@@ -1,0 +1,34 @@
+[tool.ruff]
+exclude = ["venv", "MasterGroups", ".git", "__pycache__"]
+line-length = 100
+
+[tool.ruff.lint]
+# S = bandit (security), B = bugbear, E9/F63/F7/F82 = real errors
+select = ["S", "B", "E9", "F63", "F7", "F82"]
+
+ignore = [
+    # S603: "subprocess call - check for execution of untrusted input".
+    # Fires on EVERY subprocess.run(), regardless of how safe the call is,
+    # so it cannot distinguish a hardened call from a dangerous one.
+    #
+    # Every subprocess call in this project satisfies all four of:
+    #   1. shell=False (the default) — no shell metacharacter parsing
+    #   2. argv is a fixed list, never a formatted or concatenated string
+    #   3. the executable is an absolute path resolved once via
+    #      shutil.which() at import (GIT_BIN), never looked up from $PATH
+    #      at call time
+    #   4. any user-controlled value passes check_url()/sanitize() first,
+    #      and a `--` separator stops git from parsing it as an option
+    #
+    # Point 4 is the one that matters: git parses its own argv, so
+    # `--upload-pack=<cmd>` and `ext::sh -c <cmd>` are RCE even with
+    # shell=False. Those are blocked by validation, not by this rule.
+    # See git.py:check_url and paths.py:sanitize.
+    "S603",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# S105/S106: token-shaped string literals in the redaction patterns and
+# in test fixtures are the detector, not a secret.
+"errors.py" = ["S105"]
+"remotes.py" = ["S105", "S106"]

@@ -1,0 +1,71 @@
+# ─── Personal files — never commit these ──────────────────────────────────────
+# Tokens, local config, and anything that belongs to you rather than to
+# the project.
+
+.env
+.env.local
+*.token
+instances.json
+instances.json.*
+credentials.json
+.gitlab-cli/
+
+# ─── Cloned repositories ──────────────────────────────────────────────────────
+# The directory itself stays in the repo (via .gitkeep) but its contents —
+# everyone's own working clones — are not committed.
+
+MasterGroups/*
+!MasterGroups/.gitkeep
+
+# If you chose a different directory name, add the same pair for it:
+# MyGroups/*
+# !MyGroups/.gitkeep
+
+# Per-group error logs, written next to the cloned repositories
+.*_errors.json
+errors.log
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# venv
+venv/
+env/
+ENV/
+.venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Output from security scanners (semgrep / bandit / pip-audit)
+static_analysis_*/
+scan_results/
+*.sarif
+
+# Temporary test files
+_smoke.py
+_synctest.py
+/tmp/
+
+# ─── Editor / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

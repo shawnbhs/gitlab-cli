@@ -1,0 +1,6 @@
+# Version floors are not cosmetic: installing the previous floors
+# (requests 2.31.0, python-dotenv 1.0.0) pulls in 4 known CVEs
+# (PYSEC-2026-1872, -1873, -2275, -2270). Audited with pip-audit against
+# a real install, not just against this file.
+requests>=2.33.0
+python-dotenv>=1.2.2

@@ -1,0 +1,129 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly — catches newly-published CVEs in pinned deps.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep bandit pip-audit ruff
+
+      - name: Install project dependencies
+        run: pip install -r requirements.txt
+
+      # ─── semgrep ────────────────────────────────────────────────────
+      # Telemetry off. One ruleset per run so a registry hiccup on one
+      # does not hide findings from the others.
+      - name: semgrep
+        run: |
+          fail=0
+          for cfg in \
+            p/security-audit \
+            p/secrets \
+            p/python \
+            p/command-injection \
+            p/insecure-transport
+          do
+            echo "::group::semgrep $cfg"
+            semgrep --config "$cfg" \
+                    --metrics=off \
+                    --error \
+                    --exclude=MasterGroups \
+                    --exclude=venv \
+              || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # ─── bandit ─────────────────────────────────────────────────────
+      # Only this project's own .py files. -ll = medium severity and up.
+      - name: bandit
+        run: |
+          bandit -ll -i \
+            --exclude ./venv,./MasterGroups,./.git \
+            -r .
+
+      # ─── pip-audit ──────────────────────────────────────────────────
+      # Two passes, because they answer different questions.
+      #   -r reads the file as a document.
+      #   The second audits the environment that was ACTUALLY installed,
+      #   including transitive deps the file never names. The declared
+      #   floors once passed the first check while installing 4 CVEs.
+      - name: pip-audit (declared)
+        run: pip-audit -r requirements.txt --strict
+
+      - name: pip-audit (installed floor)
+        run: |
+          python -m venv /tmp/floor
+          /tmp/floor/bin/pip install --quiet --upgrade pip
+          # Resolve each requirement to its LOWEST permitted version.
+          /tmp/floor/bin/pip install --quiet \
+            --constraint <(sed -E 's/>=/==/' requirements.txt | grep -v '^#') \
+            -r requirements.txt
+          /tmp/floor/bin/pip install --quiet pip-audit
+          /tmp/floor/bin/pip-audit --strict
+
+      # ─── Import check ───────────────────────────────────────────────
+      # A missing module is invisible to every scanner above: they read
+      # source, they do not run it. An `import` of a module that does not
+      # exist only fails when a user reaches that menu branch.
+      - name: Every module imports
+        run: |
+          fail=0
+          for f in *.py; do
+            m="${f%.py}"
+            python -c "import $m" || { echo "FAILED: $m"; fail=1; }
+          done
+          exit $fail
+
+      # ─── ruff ───────────────────────────────────────────────────────
+      # Rules and ignores come from pyproject.toml, so a local
+      # `ruff check` gives the same answer as CI.
+      - name: ruff
+        run: ruff check .
+
+  # ─── Secret scan across the FULL history ──────────────────────────
+  # A secret deleted in a later commit is still in the history and still
+  # valid. This is the check that catches it.
+  #
+  # The gitleaks binary is used directly rather than gitleaks-action,
+  # which wraps it in licensing and job-summary logic that fails on
+  # repos it does not expect. The binary is the same scanner with no
+  # key and no account.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+        env:
+          GITLEAKS_VERSION: 8.21.2
+
+      - name: Scan full history
+        run: ./gitleaks detect --source . --no-banner --redact -v
