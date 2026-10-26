@@ -1,0 +1,68 @@
+[
+  {
+    "id": "0484b655b501adb1d29f7be794b69c5658738aa3",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 700,
+        "type": null,
+        "body": "Sample text 12",
+        "attachment": null,
+        "author": {
+          "id": 5,
+          "username": "dave",
+          "name": "Dave",
+          "state": "active",
+          "locked": false,
+          "web_url": "https://gitlab.example.com/dave"
+        },
+        "created_at": "2026-09-05T04:54:39.176Z",
+        "updated_at": "2026-09-05T04:54:39.196Z",
+        "system": true,
+        "noteable_id": 102,
+        "noteable_type": "MergeRequest",
+        "project_id": 1,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false,
+        "imported": false,
+        "imported_from": "none",
+        "noteable_iid": 2,
+        "commands_changes": {}
+      }
+    ]
+  },
+  {
+    "id": "06d8e60f2f0351123c8c4c83ed2a326545c00e37",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 701,
+        "type": null,
+        "body": "Sample text 13",
+        "attachment": null,
+        "author": {
+          "id": 5,
+          "username": "dave",
+          "name": "Dave",
+          "state": "active",
+          "locked": false,
+          "web_url": "https://gitlab.example.com/dave"
+        },
+        "created_at": "2026-09-05T06:56:13.071Z",
+        "updated_at": "2026-09-05T06:56:13.085Z",
+        "system": true,
+        "noteable_id": 102,
+        "noteable_type": "MergeRequest",
+        "project_id": 1,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false,
+        "imported": false,
+        "imported_from": "none",
+        "noteable_iid": 2,
+        "commands_changes": {}
+      }
+    ]
+  }
+]

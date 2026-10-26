@@ -1,0 +1,41 @@
+[
+  {
+    "id": 501,
+    "iid": 51,
+    "project_id": 1,
+    "sha": "acb4060f6b28b9b55d30b9f46c8ff05b50857e5c",
+    "ref": "develop",
+    "status": "success",
+    "source": "push",
+    "created_at": "2026-10-11T10:24:19.580Z",
+    "updated_at": "2026-10-11T10:24:46.814Z",
+    "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/pipelines/501",
+    "name": null
+  },
+  {
+    "id": 502,
+    "iid": 52,
+    "project_id": 1,
+    "sha": "7a18fbd1928af339fbf0c2ec0b6c2d9f7e59b6b9",
+    "ref": "develop",
+    "status": "success",
+    "source": "push",
+    "created_at": "2026-10-11T08:36:35.345Z",
+    "updated_at": "2026-10-11T08:38:58.576Z",
+    "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/pipelines/502",
+    "name": null
+  },
+  {
+    "id": 503,
+    "iid": 53,
+    "project_id": 1,
+    "sha": "8e41e0fba78dfc218e9ca805c773470a561e9fa9",
+    "ref": "develop",
+    "status": "success",
+    "source": "push",
+    "created_at": "2026-10-10T08:53:00.870Z",
+    "updated_at": "2026-10-10T08:53:33.674Z",
+    "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/pipelines/503",
+    "name": null
+  }
+]

@@ -2,5 +2,13 @@
 # (requests 2.31.0, python-dotenv 1.0.0) pulls in 4 known CVEs
 # (PYSEC-2026-1872, -1873, -2275, -2270). Audited with pip-audit against
 # a real install, not just against this file.
-requests>=2.33.0
-python-dotenv>=1.2.2
+#
+# Each dependency is bounded below the next major version, so a
+# breaking release cannot reach an install without a deliberate bump.
+requests>=2.33.0,<3
+python-dotenv>=1.2.2,<2
+# MCP server + `gitlab-cli mcp` / `gitlab-cli report` (gitlab_mcp/).
+# Floor 1.30.0: 1.29.0 carries CVE-2026-59951 (fixed in 1.30.0).
+# Ceiling <2: mcp 2.x removed mcp.server.fastmcp, which
+# gitlab_mcp/server.py imports, so a 2.x install fails at import.
+mcp>=1.30.0,<2

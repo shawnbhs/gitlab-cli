@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# verify-mirror — the single self-verification command for gitlab-cli.
+#
+#   ./scripts/verify-mirror                # both instances, full report
+#   ./scripts/verify-mirror --verbose
+#   ./scripts/verify-mirror --instance Hub --json /tmp/hub.json
+#
+# Deliberately runs the SYSTEM python3, not ./venv/bin/python: the referee
+# must not be able to import the CLI's modules or its dependencies. Do not
+# "fix" this by pointing it at the venv.
+#
+# EXIT CODES — the number tells you WHICH kind of problem you have:
+#
+#   0  CLEAN        complete and tidy; nothing to do
+#   1  CORRECTNESS  the server holds data this mirror does not: missing
+#                   projects, broken clones, shallow clones
+#   2  OPERATIONAL  UNDETERMINED, not a failed check: bad token, unreachable
+#                   server, absent clone root, an empty listing with no error.
+#                   Never reportable as a clean mirror.
+#   3  SECURITY     complete, but a credential is sitting in a .git/config
+#   4  HYGIENE      complete and retrievable; the tree is untidy (duplicate
+#                   clones, .git/config not 0600, clones of projects deleted
+#                   upstream)
+#
+# Precedence is by severity, not by number: 2 > 1 > 3 > 4 > 0.
+# `--legacy-exit-codes` collapses 3 and 4 into 1 for a consumer that only
+# understands 0/1/2; the printed verdict still names the real category.
+#
+# This wrapper forwards the interpreter's status verbatim via `exec` — no
+# shell here may swallow or rewrite it. Capture it INSIDE the shell that runs
+# this: a `wsl -d Ubuntu -- bash -lc '...'` wrapper returns 0 regardless, so
+# the status has to be read with `echo "RC=$?"` on the WSL side.
+set -u
+export LC_ALL=C
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${VERIFY_MIRROR_PYTHON:-/usr/bin/python3}"
+[ -x "$PY" ] || PY="$(command -v python3)"
+exec "$PY" "$HERE/verify_mirror.py" "$@"

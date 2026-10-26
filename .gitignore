@@ -4,6 +4,9 @@
 
 .env
 .env.local
+.env.*
+!.env.example
+/env
 *.token
 instances.json
 instances.json.*
@@ -24,6 +27,8 @@ MasterGroups/*
 # Per-group error logs, written next to the cloned repositories
 .*_errors.json
 errors.log
+*.log
+logs/
 
 # ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -69,3 +74,17 @@ _synctest.py
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Quarantined debris moved aside during repair; never part of the tool.
+.quarantine/
+
+# ─── Local leftovers — never published ───────────────────────────────────────
+# Backup sidecars are usually the pre-cleanup copy of a file, i.e. the
+# version that still carries private paths. Agent/tool working dirs and
+# scratch plans stay local too.
+*.bak
+*.orig
+.hermes/
+.claude/
+caps.json
+TASKS*.md

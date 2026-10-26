@@ -1,0 +1,137 @@
+[
+  {
+    "id": 900,
+    "project_id": 14,
+    "action_name": "accepted",
+    "target_id": 100,
+    "target_iid": 8,
+    "target_type": "MergeRequest",
+    "author_id": 1,
+    "target_title": "Sample merge request title 1",
+    "created_at": "2026-09-30T13:55:51.423Z",
+    "author": {
+      "id": 1,
+      "username": "alice",
+      "public_email": "",
+      "name": "Alice",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/alice"
+    },
+    "imported": false,
+    "imported_from": "none",
+    "author_username": "alice"
+  },
+  {
+    "id": 901,
+    "project_id": 14,
+    "action_name": "pushed to",
+    "target_id": 14,
+    "target_iid": 14,
+    "target_type": "Project",
+    "author_id": 1,
+    "target_title": "Demo Scanner",
+    "created_at": "2026-09-30T13:55:51.304Z",
+    "author": {
+      "id": 1,
+      "username": "alice",
+      "public_email": "",
+      "name": "Alice",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/alice"
+    },
+    "imported": false,
+    "imported_from": "none",
+    "push_data": {
+      "commit_count": 3,
+      "action": "pushed",
+      "ref_type": "branch",
+      "commit_from": "45e87e0d3724bb9d3ceeedfa3b59f8403695e185",
+      "commit_to": "0c6ede23b0f46c5b714f49906169f0c81bd0b74a",
+      "ref": "branch-1",
+      "commit_title": "Sample text 14",
+      "ref_count": null
+    },
+    "author_username": "alice"
+  },
+  {
+    "id": 902,
+    "project_id": 11,
+    "action_name": "accepted",
+    "target_id": 101,
+    "target_iid": 9,
+    "target_type": "MergeRequest",
+    "author_id": 1,
+    "target_title": "Develop",
+    "created_at": "2026-09-30T13:54:18.269Z",
+    "author": {
+      "id": 1,
+      "username": "alice",
+      "public_email": "",
+      "name": "Alice",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/alice"
+    },
+    "imported": false,
+    "imported_from": "none",
+    "author_username": "alice"
+  },
+  {
+    "id": 903,
+    "project_id": 11,
+    "action_name": "pushed to",
+    "target_id": 11,
+    "target_iid": 11,
+    "target_type": "Project",
+    "author_id": 1,
+    "target_title": "Demo App",
+    "created_at": "2026-09-30T13:54:18.168Z",
+    "author": {
+      "id": 1,
+      "username": "alice",
+      "public_email": "",
+      "name": "Alice",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/alice"
+    },
+    "imported": false,
+    "imported_from": "none",
+    "push_data": {
+      "commit_count": 3,
+      "action": "pushed",
+      "ref_type": "branch",
+      "commit_from": "996674dcefc09f91098c9d82ad26e2d38bfac2b0",
+      "commit_to": "df4699b0a08ca6053590958ac823532af5b16686",
+      "ref": "branch-1",
+      "commit_title": "Sample text 1",
+      "ref_count": null
+    },
+    "author_username": "alice"
+  },
+  {
+    "id": 904,
+    "project_id": 11,
+    "action_name": "opened",
+    "target_id": 101,
+    "target_iid": 9,
+    "target_type": "MergeRequest",
+    "author_id": 1,
+    "target_title": "Develop",
+    "created_at": "2026-09-30T13:53:58.705Z",
+    "author": {
+      "id": 1,
+      "username": "alice",
+      "public_email": "",
+      "name": "Alice",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/alice"
+    },
+    "imported": false,
+    "imported_from": "none",
+    "author_username": "alice"
+  }
+]

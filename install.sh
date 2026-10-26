@@ -66,8 +66,27 @@ fi
 
 if grep -q "alias gitlab-cli=" "$SHELL_RC" 2>/dev/null; then
     # Path may have changed since last install, so refresh it.
-    sed -i.bak "s|alias gitlab-cli=.*|${ALIAS_CMD}|" "$SHELL_RC"
+    #
+    # Not `sed -i.bak`: that silently overwrites any ~/.zshrc.bak the
+    # user already had, replaces a symlinked rc file with a plain copy,
+    # and treats `&` or `|` in the install path as sed syntax.
+    #   - the backup name is timestamped, so nothing existing is replaced
+    #   - the new text is written back THROUGH the original file
+    #     (cat >), keeping its inode, mode and any symlink intact
+    #   - awk reads the alias from the environment, so it is literal
+    RC_BACKUP="${SHELL_RC}.gitlab-cli-$(date +%Y%m%d-%H%M%S).bak"
+    cp -p "$SHELL_RC" "$RC_BACKUP"
+    RC_TMP="$(mktemp "${SHELL_RC}.gitlab-cli.XXXXXX")"
+    trap 'rm -f "$RC_TMP"' EXIT
+    NEW_ALIAS="$ALIAS_CMD" awk '{
+        i = index($0, "alias gitlab-cli=")
+        if (i) { print substr($0, 1, i - 1) ENVIRON["NEW_ALIAS"] } else { print }
+    }' "$SHELL_RC" > "$RC_TMP"
+    cat "$RC_TMP" > "$SHELL_RC"
+    rm -f "$RC_TMP"
+    trap - EXIT
     echo -e "      ${GREEN}✔ alias updated in ${SHELL_RC}${RESET}"
+    echo -e "      ${DIM}previous version saved as ${RC_BACKUP}${RESET}"
 else
     {
         echo ""
@@ -90,5 +109,6 @@ echo -e "  2. Run it — the setup wizard will ask for what it needs:"
 echo -e "     ${YELLOW}gitlab-cli${RESET}"
 echo ""
 echo -e "${DIM}  You will need a token: GitLab → Settings → Access Tokens"
-echo -e "  Scopes: read_api (minimum) or api + read_repository${RESET}"
+echo -e "  Scopes: read_api + read_repository (minimum);"
+echo -e "  add api for member/management actions, write_repository to push.${RESET}"
 echo ""

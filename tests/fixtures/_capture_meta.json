@@ -1,0 +1,202 @@
+{
+  "source": "two GitLab CE instances, synthetic data in captured shapes",
+  "requests": 28,
+  "endpoints": [
+    {
+      "instance": "inst1",
+      "label": "user",
+      "path": "/user",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "users_by_username",
+      "path": "/users?username=:username",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "user_events",
+      "path": "/users/:id/events",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "projects",
+      "path": "/projects",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "commits",
+      "path": "/projects/:id/repository/commits",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "commit_diff",
+      "path": "/projects/:id/repository/commits/:sha/diff",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "merge_requests",
+      "path": "/projects/:id/merge_requests",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "mr_changes",
+      "path": "/projects/:id/merge_requests/:iid/changes",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "mr_diffs",
+      "path": "/projects/:id/merge_requests/:iid/diffs",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "mr_discussions",
+      "path": "/projects/:id/merge_requests/:iid/discussions",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "mr_approvals",
+      "path": "/projects/:id/merge_requests/:iid/approvals",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "pipelines",
+      "path": "/projects/:id/pipelines",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "version",
+      "path": "/version",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst1",
+      "label": "metadata",
+      "path": "/metadata",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "user",
+      "path": "/user",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "users_by_username",
+      "path": "/users?username=:username",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "user_events",
+      "path": "/users/:id/events",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "projects",
+      "path": "/projects",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "commits",
+      "path": "/projects/:id/repository/commits",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "commit_diff",
+      "path": "/projects/:id/repository/commits/:sha/diff",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "merge_requests",
+      "path": "/projects/:id/merge_requests",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "mr_changes",
+      "path": "/projects/:id/merge_requests/:iid/changes",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "mr_diffs",
+      "path": "/projects/:id/merge_requests/:iid/diffs",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "mr_discussions",
+      "path": "/projects/:id/merge_requests/:iid/discussions",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "mr_approvals",
+      "path": "/projects/:id/merge_requests/:iid/approvals",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "pipelines",
+      "path": "/projects/:id/pipelines",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "version",
+      "path": "/version",
+      "status": 200,
+      "error": ""
+    },
+    {
+      "instance": "inst2",
+      "label": "metadata",
+      "path": "/metadata",
+      "status": 200,
+      "error": ""
+    }
+  ]
+}

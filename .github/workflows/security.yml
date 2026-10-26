@@ -12,23 +12,78 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same ref supersedes the run already in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Third-party code that runs here is pinned to an exact, verifiable
+# version: actions by full commit SHA (a tag can be moved, a SHA cannot),
+# scanners by exact version, and the gitleaks tarball by sha256.
+# To bump an action: `git ls-remote https://github.com/actions/<name> refs/tags/<tag>`.
+
 jobs:
+  # ─── Test suite on every supported Python ─────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: MCP server imports
+        run: python -c 'import gitlab_mcp.server'
+
+      - name: Test suite
+        run: python tests/run_tests.py
+
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
+      # Scanners live in their own venv so their dependency pins cannot
+      # change what the project resolves to (and vice versa). Exact
+      # versions, so a scanner release cannot turn CI red overnight;
+      # bump them deliberately.
       - name: Install scanners
         run: |
-          python -m pip install --upgrade pip
-          pip install semgrep bandit pip-audit ruff
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet --upgrade pip setuptools
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet \
+            semgrep==1.174.0 \
+            bandit==1.9.4 \
+            pip-audit==2.10.1 \
+            ruff==0.16.4
 
+      # pip-audit audits whatever environment it is pointed at, so the
+      # runner image's stale setuptools would fail it with a CVE that is
+      # not a project dependency. Upgrade it first.
       - name: Install project dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements.txt
 
       # ─── semgrep ────────────────────────────────────────────────────
       # Telemetry off. One ruleset per run so a registry hiccup on one
@@ -44,7 +99,7 @@ jobs:
             p/insecure-transport
           do
             echo "::group::semgrep $cfg"
-            semgrep --config "$cfg" \
+            "$RUNNER_TEMP/tools/bin/semgrep" --config "$cfg" \
                     --metrics=off \
                     --error \
                     --exclude=MasterGroups \
@@ -58,7 +113,7 @@ jobs:
       # Only this project's own .py files. -ll = medium severity and up.
       - name: bandit
         run: |
-          bandit -ll -i \
+          "$RUNNER_TEMP/tools/bin/bandit" -ll -i \
             --exclude ./venv,./MasterGroups,./.git \
             -r .
 
@@ -69,18 +124,18 @@ jobs:
       #   including transitive deps the file never names. The declared
       #   floors once passed the first check while installing 4 CVEs.
       - name: pip-audit (declared)
-        run: pip-audit -r requirements.txt --strict
+        run: '"$RUNNER_TEMP/tools/bin/pip-audit" -r requirements.txt --strict'
 
       - name: pip-audit (installed floor)
         run: |
-          python -m venv /tmp/floor
-          /tmp/floor/bin/pip install --quiet --upgrade pip
+          python -m venv "$RUNNER_TEMP/floor"
+          "$RUNNER_TEMP/floor/bin/pip" install --quiet --upgrade pip setuptools
           # Resolve each requirement to its LOWEST permitted version.
-          /tmp/floor/bin/pip install --quiet \
+          "$RUNNER_TEMP/floor/bin/pip" install --quiet \
             --constraint <(sed -E 's/>=/==/' requirements.txt | grep -v '^#') \
             -r requirements.txt
-          /tmp/floor/bin/pip install --quiet pip-audit
-          /tmp/floor/bin/pip-audit --strict
+          "$RUNNER_TEMP/tools/bin/pip-audit" --strict \
+            --path "$("$RUNNER_TEMP/floor/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
       # ─── Import check ───────────────────────────────────────────────
       # A missing module is invisible to every scanner above: they read
@@ -93,13 +148,14 @@ jobs:
             m="${f%.py}"
             python -c "import $m" || { echo "FAILED: $m"; fail=1; }
           done
+          python -c "import gitlab_mcp.server" || { echo "FAILED: gitlab_mcp.server"; fail=1; }
           exit $fail
 
       # ─── ruff ───────────────────────────────────────────────────────
       # Rules and ignores come from pyproject.toml, so a local
       # `ruff check` gives the same answer as CI.
       - name: ruff
-        run: ruff check .
+        run: '"$RUNNER_TEMP/tools/bin/ruff" check .'
 
   # ─── Secret scan across the FULL history ──────────────────────────
   # A secret deleted in a later commit is still in the history and still
@@ -111,19 +167,27 @@ jobs:
   # key and no account.
   secrets:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # Full history: a shallow clone scans one commit and reports
+          # clean on a repo with a token three commits back.
           fetch-depth: 0
+          persist-credentials: false
 
+      # sha256 is from the official gitleaks_8.21.2_checksums.txt on the
+      # v8.21.2 release. Bump GITLEAKS_VERSION and GITLEAKS_SHA256 together.
       - name: Install gitleaks
         run: |
           curl -sSfL -o gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
           tar xzf gitleaks.tar.gz gitleaks
           ./gitleaks version
         env:
           GITLEAKS_VERSION: 8.21.2
+          GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
 
       - name: Scan full history
         run: ./gitleaks detect --source . --no-banner --redact -v

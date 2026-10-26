@@ -1,0 +1,70 @@
+[
+  {
+    "id": "ec9b3320369adf6ff642a063e6eb53a7fe0ef184",
+    "individual_note": true,
+    "resolvable": false,
+    "notes": [
+      {
+        "id": 700,
+        "type": null,
+        "body": "Sample text 24",
+        "author": {
+          "id": 4,
+          "username": "lena",
+          "public_email": "",
+          "name": "Lena",
+          "state": "active",
+          "locked": false,
+          "web_url": "https://gitlab.example.com/lena"
+        },
+        "created_at": "2026-10-11T06:34:42.345Z",
+        "updated_at": "2026-10-11T06:34:42.350Z",
+        "system": true,
+        "noteable_id": 102,
+        "noteable_type": "MergeRequest",
+        "project_id": 11,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false,
+        "imported": false,
+        "imported_from": "none",
+        "noteable_iid": 5,
+        "commands_changes": {}
+      }
+    ]
+  },
+  {
+    "id": "9624b27c40dc03fb88d9d973c71f44f994ab2a91",
+    "individual_note": true,
+    "resolvable": false,
+    "notes": [
+      {
+        "id": 701,
+        "type": null,
+        "body": "Sample text 25",
+        "author": {
+          "id": 4,
+          "username": "lena",
+          "public_email": "",
+          "name": "Lena",
+          "state": "active",
+          "locked": false,
+          "web_url": "https://gitlab.example.com/lena"
+        },
+        "created_at": "2026-10-11T06:34:47.747Z",
+        "updated_at": "2026-10-11T06:34:47.748Z",
+        "system": true,
+        "noteable_id": 102,
+        "noteable_type": "MergeRequest",
+        "project_id": 11,
+        "resolvable": false,
+        "confidential": false,
+        "internal": false,
+        "imported": false,
+        "imported_from": "none",
+        "noteable_iid": 5,
+        "commands_changes": {}
+      }
+    ]
+  }
+]

@@ -1,0 +1,203 @@
+{
+  "id": 102,
+  "iid": 5,
+  "project_id": 11,
+  "title": "Sample text 20",
+  "description": "Sample text 21",
+  "state": "merged",
+  "created_at": "2026-10-11T06:34:42.054Z",
+  "updated_at": "2026-10-11T06:34:48.107Z",
+  "merged_by": {
+    "id": 4,
+    "username": "lena",
+    "public_email": "",
+    "name": "Lena",
+    "state": "active",
+    "locked": false,
+    "web_url": "https://gitlab.example.com/lena"
+  },
+  "merge_user": {
+    "id": 4,
+    "username": "lena",
+    "public_email": "",
+    "name": "Lena",
+    "state": "active",
+    "locked": false,
+    "web_url": "https://gitlab.example.com/lena"
+  },
+  "merged_at": "2026-10-11T06:34:47.759Z",
+  "closed_by": null,
+  "closed_at": null,
+  "target_branch": "develop",
+  "source_branch": "branch-4",
+  "user_notes_count": 0,
+  "upvotes": 0,
+  "downvotes": 0,
+  "author": {
+    "id": 4,
+    "username": "lena",
+    "public_email": "",
+    "name": "Lena",
+    "state": "active",
+    "locked": false,
+    "web_url": "https://gitlab.example.com/lena"
+  },
+  "assignees": [
+    {
+      "id": 4,
+      "username": "lena",
+      "public_email": "",
+      "name": "Lena",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/lena"
+    }
+  ],
+  "assignee": {
+    "id": 4,
+    "username": "lena",
+    "public_email": "",
+    "name": "Lena",
+    "state": "active",
+    "locked": false,
+    "web_url": "https://gitlab.example.com/lena"
+  },
+  "reviewers": [],
+  "source_project_id": 11,
+  "target_project_id": 11,
+  "labels": [],
+  "draft": false,
+  "imported": false,
+  "imported_from": "none",
+  "work_in_progress": false,
+  "milestone": null,
+  "merge_when_pipeline_succeeds": false,
+  "merge_status": "can_be_merged",
+  "detailed_merge_status": "not_open",
+  "merge_after": null,
+  "sha": "02af17a344a0212e403010ac3391aa9197cf030b",
+  "merge_commit_sha": "1cfa4a8f33b56594c78bb6979a94a0dea68c40e2",
+  "squash_commit_sha": null,
+  "discussion_locked": null,
+  "should_remove_source_branch": false,
+  "force_remove_source_branch": true,
+  "prepared_at": "2026-10-11T06:34:43.428Z",
+  "reference": "!5",
+  "references": {
+    "short": "!5",
+    "relative": "!5",
+    "full": "example-group/sub/demo-app!5"
+  },
+  "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/merge_requests/5",
+  "time_stats": {
+    "time_estimate": 0,
+    "total_time_spent": 0,
+    "human_time_estimate": null,
+    "human_total_time_spent": null
+  },
+  "squash": false,
+  "squash_on_merge": false,
+  "task_completion_status": {
+    "count": 0,
+    "completed_count": 0
+  },
+  "has_conflicts": false,
+  "blocking_discussions_resolved": true,
+  "subscribed": false,
+  "changes_count": "6",
+  "latest_build_started_at": null,
+  "latest_build_finished_at": null,
+  "first_deployed_to_production_at": null,
+  "pipeline": null,
+  "head_pipeline": null,
+  "diff_refs": {
+    "base_sha": "0c3a6cbbe8083c162fea9aea2525569e75c85b90",
+    "head_sha": "02af17a344a0212e403010ac3391aa9197cf030b",
+    "start_sha": "ac85005f4d1e8a2b0de442a8b42ac516ef4e11ed"
+  },
+  "merge_error": null,
+  "user": {
+    "can_merge": true
+  },
+  "changes": [
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.tsx",
+      "old_path": "src/sample_file.tsx",
+      "a_mode": "100644",
+      "b_mode": "100644",
+      "new_file": false,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    },
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.tsx",
+      "old_path": "src/sample_file.tsx",
+      "a_mode": "0",
+      "b_mode": "100644",
+      "new_file": true,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    },
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.tsx",
+      "old_path": "src/sample_file.tsx",
+      "a_mode": "100644",
+      "b_mode": "100644",
+      "new_file": false,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    },
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.ts",
+      "old_path": "src/sample_file.ts",
+      "a_mode": "0",
+      "b_mode": "100644",
+      "new_file": true,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    },
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.tsx",
+      "old_path": "src/sample_file.tsx",
+      "a_mode": "100644",
+      "b_mode": "100644",
+      "new_file": false,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    },
+    {
+      "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+      "collapsed": false,
+      "too_large": false,
+      "new_path": "src/sample_file.ts",
+      "old_path": "src/sample_file.ts",
+      "a_mode": "100644",
+      "b_mode": "100644",
+      "new_file": false,
+      "renamed_file": false,
+      "deleted_file": false,
+      "generated_file": false
+    }
+  ],
+  "overflow": false
+}

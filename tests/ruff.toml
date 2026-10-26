@@ -1,0 +1,12 @@
+# Lint settings for the test suite. Inherits everything from the project
+# config and relaxes only the rules a test suite trips by design.
+extend = "../pyproject.toml"
+
+[lint.per-file-ignores]
+# S101: assert in helpers is how a test states a precondition.
+# S105/S106: token-shaped literals are synthetic fixtures for the redaction
+#            and credential-hygiene tests, never real secrets.
+# S108: /tmp literals are fake paths passed as data, never written to.
+# S103: tests loosen permissions on purpose to prove the code tightens them.
+# S607: premise tests run `git` from PATH to pin git's own behaviour.
+"*" = ["S101", "S103", "S105", "S106", "S108", "S607"]

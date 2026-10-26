@@ -1,0 +1,41 @@
+[
+  {
+    "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+    "collapsed": false,
+    "too_large": false,
+    "new_path": "src/sample_file.tsx",
+    "old_path": "src/sample_file.tsx",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "generated_file": false
+  },
+  {
+    "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+    "collapsed": false,
+    "too_large": false,
+    "new_path": "src/sample_file.tsx",
+    "old_path": "src/sample_file.tsx",
+    "a_mode": "0",
+    "b_mode": "100644",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false,
+    "generated_file": false
+  },
+  {
+    "diff": "@@ -1,4 +1,5 @@\n context line one\n-removed line\n+added line one\n+added line two\n context line two\n",
+    "collapsed": false,
+    "too_large": false,
+    "new_path": "src/sample_file.tsx",
+    "old_path": "src/sample_file.tsx",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "generated_file": false
+  }
+]

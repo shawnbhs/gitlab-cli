@@ -1,0 +1,11 @@
+{
+  "version": "19.1.1",
+  "revision": "04cd8ad1a9c",
+  "kas": {
+    "enabled": true,
+    "externalUrl": "ws://gitlab.example.com/-/kubernetes-agent/",
+    "externalK8sProxyUrl": "https://gitlab.example.com/-/kubernetes-agent/k8s-proxy/",
+    "version": "19.1.1"
+  },
+  "enterprise": false
+}

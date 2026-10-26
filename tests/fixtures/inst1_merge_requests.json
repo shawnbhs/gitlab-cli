@@ -1,0 +1,190 @@
+[
+  {
+    "id": 102,
+    "iid": 2,
+    "project_id": 1,
+    "title": "Sample text 9",
+    "description": "Sample text 10",
+    "state": "merged",
+    "created_at": "2026-09-05T04:54:38.998Z",
+    "updated_at": "2026-09-05T06:56:13.046Z",
+    "merged_by": {
+      "id": 5,
+      "username": "dave",
+      "name": "Dave",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/dave"
+    },
+    "merge_user": {
+      "id": 5,
+      "username": "dave",
+      "name": "Dave",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/dave"
+    },
+    "merged_at": "2026-09-05T06:56:13.145Z",
+    "closed_by": null,
+    "closed_at": null,
+    "target_branch": "branch-1",
+    "source_branch": "develop",
+    "user_notes_count": 0,
+    "upvotes": 0,
+    "downvotes": 0,
+    "author": {
+      "id": 5,
+      "username": "dave",
+      "name": "Dave",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/dave"
+    },
+    "assignees": [
+      {
+        "id": 5,
+        "username": "dave",
+        "name": "Dave",
+        "state": "active",
+        "locked": false,
+        "web_url": "https://gitlab.example.com/dave"
+      }
+    ],
+    "assignee": {
+      "id": 5,
+      "username": "dave",
+      "name": "Dave",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/dave"
+    },
+    "reviewers": [],
+    "source_project_id": 1,
+    "target_project_id": 1,
+    "labels": [],
+    "draft": false,
+    "imported": false,
+    "imported_from": "none",
+    "work_in_progress": false,
+    "milestone": null,
+    "merge_when_pipeline_succeeds": false,
+    "merge_status": "can_be_merged",
+    "detailed_merge_status": "not_open",
+    "merge_after": null,
+    "sha": "51c15fc3d07255e82405aa7852c065beb1553362",
+    "merge_commit_sha": "5e83b928cc0edf0b8f1fc93e75e9c7dcaea9282a",
+    "squash_commit_sha": null,
+    "discussion_locked": null,
+    "should_remove_source_branch": null,
+    "force_remove_source_branch": null,
+    "prepared_at": "2026-09-05T04:54:44.887Z",
+    "reference": "!2",
+    "references": {
+      "short": "!2",
+      "relative": "!2",
+      "full": "example-group/sub/demo-app!2"
+    },
+    "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/merge_requests/2",
+    "time_stats": {
+      "time_estimate": 0,
+      "total_time_spent": 0,
+      "human_time_estimate": null,
+      "human_total_time_spent": null
+    },
+    "squash": false,
+    "squash_on_merge": false,
+    "task_completion_status": {
+      "count": 0,
+      "completed_count": 0
+    },
+    "has_conflicts": false,
+    "blocking_discussions_resolved": true
+  },
+  {
+    "id": 103,
+    "iid": 1,
+    "project_id": 1,
+    "title": "Sample text 9",
+    "description": "Sample text 10",
+    "state": "opened",
+    "created_at": "2026-08-05T08:22:30.592Z",
+    "updated_at": "2026-10-11T10:24:22.218Z",
+    "merged_by": null,
+    "merge_user": null,
+    "merged_at": null,
+    "closed_by": null,
+    "closed_at": null,
+    "target_branch": "branch-3",
+    "source_branch": "develop",
+    "user_notes_count": 0,
+    "upvotes": 0,
+    "downvotes": 0,
+    "author": {
+      "id": 6,
+      "username": "erin",
+      "name": "Erin",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/erin"
+    },
+    "assignees": [
+      {
+        "id": 5,
+        "username": "dave",
+        "name": "Dave",
+        "state": "active",
+        "locked": false,
+        "web_url": "https://gitlab.example.com/dave"
+      }
+    ],
+    "assignee": {
+      "id": 5,
+      "username": "dave",
+      "name": "Dave",
+      "state": "active",
+      "locked": false,
+      "web_url": "https://gitlab.example.com/dave"
+    },
+    "reviewers": [],
+    "source_project_id": 1,
+    "target_project_id": 1,
+    "labels": [],
+    "draft": false,
+    "imported": false,
+    "imported_from": "none",
+    "work_in_progress": false,
+    "milestone": null,
+    "merge_when_pipeline_succeeds": false,
+    "merge_status": "unchecked",
+    "detailed_merge_status": "unchecked",
+    "merge_after": null,
+    "sha": "acb4060f6b28b9b55d30b9f46c8ff05b50857e5c",
+    "merge_commit_sha": null,
+    "squash_commit_sha": null,
+    "discussion_locked": null,
+    "should_remove_source_branch": null,
+    "force_remove_source_branch": null,
+    "prepared_at": "2026-08-05T08:22:32.838Z",
+    "reference": "!1",
+    "references": {
+      "short": "!1",
+      "relative": "!1",
+      "full": "example-group/sub/demo-app!1"
+    },
+    "web_url": "https://gitlab.example.com/example-group/sub/demo-app/-/merge_requests/1",
+    "time_stats": {
+      "time_estimate": 0,
+      "total_time_spent": 0,
+      "human_time_estimate": null,
+      "human_total_time_spent": null
+    },
+    "squash": false,
+    "squash_on_merge": false,
+    "task_completion_status": {
+      "count": 0,
+      "completed_count": 0
+    },
+    "has_conflicts": false,
+    "blocking_discussions_resolved": true
+  }
+]
