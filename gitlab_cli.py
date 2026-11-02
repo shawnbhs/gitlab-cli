@@ -105,6 +105,11 @@ def _warn_if_offsite(resolved: str, default: str, what: str):
           f"anything written here will not be listed there.{RESET}\n")
 
 
+def _n(count: int, noun: str) -> str:
+    """'1 group' / '2 groups' — a count of one never takes the plural."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 def group_status(group: dict, dest: str) -> str:
     """Kept for compatibility — folder existence only. Prefer group_coverage."""
     local_path = os.path.join(dest, group["path"])
@@ -608,7 +613,7 @@ def _failures_to_disclose(failures: list, orphans) -> list:
 def _print_group_menu(incomplete: int, has_details: bool):
     """The key lines under the group list (redrawn after the `o` screen)."""
     print(f"\n  {GREEN}ca{RESET}  Clone All  — fetch every missing project"
-          f"  {DIM}({incomplete} groups incomplete){RESET}")
+          f"  {DIM}({_n(incomplete, 'group')} incomplete){RESET}")
     print(f"  {CYAN}pa{RESET}  Pull All   — sync every group that has clones")
     if has_details:
         print(f"  {CYAN}o{RESET}   Details    — orphan paths and API failures "
@@ -780,6 +785,11 @@ def pick_group(cfg: dict, dest: str) -> dict:
     # sentence; when the instance total is unobtainable the fraction is still
     # printed with the noun, never bare.
     counts = _instance_coverage_counts(cfg, index, projects)
+    # The same numbers the coverage line just printed, handed to Clone All so
+    # its user-namespace line cannot contradict this screen. None = UNKNOWN.
+    user_ns = ({"total": int(counts.get("user_total", 0)),
+                "present": int(counts.get("user_present", 0))}
+               if counts else None)
     if counts and counts.get("group_total") == total:
         # The two group denominators agree (recursive-per-group sum == flat
         # namespace.kind=='group' count), so the roll-up can be rendered by
@@ -859,7 +869,7 @@ def pick_group(cfg: dict, dest: str) -> dict:
                 print(f"  {GREEN}✔ Every project is already cloned!{RESET}\n")
                 continue
             return {"_bulk": "clone_all", "_groups": not_cloned,
-                    "_index": index}
+                    "_index": index, "_user_ns": user_ns}
 
         if low == "pa":
             cloned = [g for g in groups if statuses[g["id"]] in ("✅", "◐")]
@@ -1069,11 +1079,12 @@ def _run_remotes(cfg: dict):
         print_warn(f"There is no repo of instance '{who}' in {dest}."
                    f" Clone something first.")
         for name, n in sorted((foreign or {}).items()):
-            print(f"  {DIM}({n} repos under this root belong to {name} and "
-                  f"are not this instance's){RESET}")
+            print(f"  {DIM}({_n(n, 'repo')} under this root "
+                  f"belong{'s' if n == 1 else ''} to {name} and "
+                  f"{'is' if n == 1 else 'are'} not this instance's){RESET}")
         return
 
-    print_info(f"{len(repos)} repos of '{remotes.scope_label(scope)}' "
+    print_info(f"{_n(len(repos), 'repo')} of '{remotes.scope_label(scope)}' "
                f"found — checking...")
     rows = remotes.audit(repos, check_network=False, scope=scope)
     remotes.print_audit(rows)
@@ -1082,7 +1093,9 @@ def _run_remotes(cfg: dict):
     if not leaky:
         return
 
-    print_warn(f"{len(leaky)} repos have the token stored in the remote URL.")
+    print_warn(f"{_n(len(leaky), 'repo')} "
+               f"{'has' if len(leaky) == 1 else 'have'} the token stored in "
+               f"the remote URL.")
     print(f"  {DIM}The token is stored in plain text in .git/config —"
           f" it leaks if you share the repo.{RESET}")
 
@@ -1173,14 +1186,31 @@ def _bulk_failure(kind: str, gpath: str, exc: BaseException) -> dict:
             "code": info.code, "title": info.title, "fix": info.fix}
 
 
+def _api_error_lines(api_errors: list, shown: int = 5) -> list:
+    """One dim line per distinct API error message, most frequent first."""
+    counts = Counter(str(e) for e in api_errors)
+    lines = [f"   {DIM}✖ {msg}" + (f"  (×{n})" if n > 1 else "") + RESET
+             for msg, n in counts.most_common(shown)]
+    if len(counts) > shown:
+        lines.append(f"   {DIM}… and {len(counts) - shown} more{RESET}")
+    return lines
+
+
 def _print_bulk_summary(kind: str, total: int, done: int,
-                        failed: list, interrupted: bool):
-    """Close a bulk run honestly: "finished" is earned, never the default."""
+                        failed: list, interrupted: bool,
+                        api_errors: list = ()):
+    """Close a bulk run honestly: "finished" is earned, never the default.
+
+    `api_errors` are the ledger entries recorded DURING the run. A group can
+    "succeed" on a listing cut short by a dropped VPN, so any of them
+    downgrades the green tick to a warning.
+    """
     print_separator()
+    api_errors = list(api_errors or ())
     skipped = total - done - len(failed)
     if failed:
         print(f"\n{YELLOW}⚠ {kind} finished with failures — "
-              f"{done}/{total} groups done, {len(failed)} failed"
+              f"{done}/{_n(total, 'group')} done, {len(failed)} failed"
               + (f", {skipped} not attempted" if skipped > 0 else "")
               + f".{RESET}")
         for line in _bulk_failure_groups(failed):
@@ -1189,10 +1219,27 @@ def _print_bulk_summary(kind: str, total: int, done: int,
               f"with 'gitlab-cli' → 5 (Error Log). Re-running {kind} "
               f"retries only what is still missing.{RESET}\n")
     elif interrupted:
-        print(f"\n{YELLOW}⚠ {kind} interrupted — {done}/{total} groups "
+        print(f"\n{YELLOW}⚠ {kind} interrupted — {done}/{_n(total, 'group')} "
               f"done, {skipped} not attempted.{RESET}\n")
+    elif api_errors:
+        print(f"\n{YELLOW}⚠ {kind} finished with {len(api_errors)} API "
+              f"error(s) — {done}/{_n(total, 'group')}; results may be "
+              f"incomplete; reconnect the VPN and re-run.{RESET}")
+        for line in _api_error_lines(api_errors):
+            print(line)
+        print()
+        return
     else:
-        print(f"\n{GREEN}✔ {kind} finished — {done}/{total} groups.{RESET}\n")
+        print(f"\n{GREEN}✔ {kind} finished — {done}/{_n(total, 'group')}."
+              f"{RESET}\n")
+        return
+    if api_errors:
+        print(f"   {YELLOW}⚠ {len(api_errors)} API error(s) during this run — "
+              f"results may be incomplete; reconnect the VPN and re-run:"
+              f"{RESET}")
+        for line in _api_error_lines(api_errors):
+            print(line)
+        print()
 
 
 def _bulk_failure_groups(failed: list, names_shown: int = 5) -> list:
@@ -1229,6 +1276,13 @@ def _run_bulk(kind: str, groups: list, run_one) -> tuple:
     """
     done, failed, interrupted = 0, [], False
     total = len(groups)
+    # Snapshot, never reset: earlier failures belong to earlier screens.
+    # ponytail: the ledger is capped at 500, so a run that overflows it
+    # under-reports the tail; add a run id to api.record_failure if that bites.
+    try:
+        ledger_before = api.failure_count()
+    except Exception:                      # noqa: BLE001
+        ledger_before = None
 
     for i, g in enumerate(groups, 1):
         gpath = g.get("full_path") or str(g.get("id", "?"))
@@ -1243,7 +1297,12 @@ def _run_bulk(kind: str, groups: list, run_one) -> tuple:
         except Exception as exc:        # noqa: BLE001 - reported + logged
             failed.append(_bulk_failure(kind, gpath, exc))
 
-    _print_bulk_summary(kind, total, done, failed, interrupted)
+    try:
+        api_errors = ([] if ledger_before is None
+                      else api.failures()[ledger_before:])
+    except Exception:                      # noqa: BLE001
+        api_errors = []
+    _print_bulk_summary(kind, total, done, failed, interrupted, api_errors)
     return done, failed, interrupted
 
 
@@ -1329,14 +1388,14 @@ def interactive_mode(cfg: dict):
         if group.get("_bulk") == "clone_all":
             groups = group["_groups"]
             index  = group.get("_index") or {}
-            print(f"\n{BOLD}📥 Clone All — {len(groups)} groups{RESET}\n")
+            print(f"\n{BOLD}📥 Clone All — {_n(len(groups), 'group')}{RESET}\n")
             print_separator()
 
             # W9-2 / W8-5-§10.1. "Clone All" is group-based. Whether that
             # means "everything" depends on a setting the user may never
             # have seen, so the policy is stated here, before the first
             # clone, in every scope — and scope=all is confirmed out loud.
-            user_ns = _user_namespace_gate(cfg)
+            user_ns = _user_namespace_gate(cfg, group.get("_user_ns"))
             if user_ns:
                 print_warn(f"{len(user_ns)} user-namespace project(s) are in "
                            f"scope and CONFIRMED, but the clone engine is "
@@ -1362,7 +1421,7 @@ def interactive_mode(cfg: dict):
         if group.get("_bulk") == "pull_all":
             groups = group["_groups"]
             index  = group.get("_index") or {}
-            print(f"\n{BOLD}🔄 Sync All — {len(groups)} groups{RESET}\n")
+            print(f"\n{BOLD}🔄 Sync All — {_n(len(groups), 'group')}{RESET}\n")
             print_separator()
 
             # The index is shared across groups: once one group's clones are
@@ -1411,7 +1470,8 @@ def interactive_mode(cfg: dict):
                             f"{gcov.get('cloned', 0)}/{gcov.get('total', 0)}{RESET}")
         else:
             status_label = f"{YELLOW}not cloned{RESET}"
-        err_label    = f"  {RED}⚠ {err_count} errors{RESET}" if has_errors else ""
+        err_label    = (f"  {RED}⚠ {_n(err_count, 'error')}{RESET}"
+                        if has_errors else "")
         print(f"\n  {status}  {BOLD}{gpath}{RESET}  {DIM}({status_label}){RESET}{err_label}\n")
 
         # The listing's own disclosure of what it contains, and why it is
@@ -1469,7 +1529,7 @@ def interactive_mode(cfg: dict):
         print()
 
 
-def _user_namespace_gate(cfg: dict) -> list:
+def _user_namespace_gate(cfg: dict, user_counts: dict = None) -> list:
     """Disclose the user-namespace policy, and gate `scope=all` behind y/N.
 
     W9-2 / W8-5-§10.1. `setup.fetch_user_namespace_projects()` was built,
@@ -1486,6 +1546,10 @@ def _user_namespace_gate(cfg: dict) -> list:
         PEOPLE's private repositories onto this laptop — which is precisely
         why it stayed unwired for so long. Enter, EOF, Ctrl-C and anything
         that is not `y` all mean no, and mean it by excluding.
+
+    `user_counts` ({"total", "present"} from the group list's coverage
+    counts, or None when UNKNOWN) feeds the scope=off line, so Clone All
+    states the same numbers the group list just printed, in one line.
 
     Returns the list of user-namespace projects the caller may clone —
     ALWAYS empty unless the scope is enabled and, for `all`, confirmed.
@@ -1507,11 +1571,18 @@ def _user_namespace_gate(cfg: dict) -> list:
         _log_recoverable(exc, "clone all :: user-namespace discovery")
         return []
 
+    if scope == "off":
+        print(f"\n  {DIM}{_user_ns_off_line(user_counts)}{RESET}")
+        _scope, note = setup_mod.user_ns_setting(cfg)
+        if note:                            # an unreadable setting, said aloud
+            print(f"  {YELLOW}{note}{RESET}")
+        return []
+
     print(f"\n{BOLD}{WHITE}  User namespaces{RESET}  {DIM}(scope={scope}){RESET}")
     for line in lines:
         print(f"  {DIM}{line}{RESET}")
 
-    if scope == "off" or not projects:
+    if not projects:
         return []
 
     if scope == "all":
@@ -1536,6 +1607,24 @@ def _user_namespace_gate(cfg: dict) -> list:
             print(f"    {DIM}… and {len(projects) - 20} more{RESET}")
 
     return list(projects)
+
+
+def _user_ns_off_line(counts) -> str:
+    """The ONE line Clone All prints for scope=off, with the real count."""
+    if not counts:
+        what = "count unknown"
+    else:
+        total = int(counts.get("total", 0))
+        missing = max(0, total - int(counts.get("present", 0)))
+        if total == 0:
+            what = "none on this instance"
+        elif missing == 0:
+            what = f"{_n(total, 'project')}, already on disk"
+        else:
+            what = f"{_n(total, 'project')}, {missing} not on disk"
+    return (f"User namespaces: off ({what}) — EXCLUDED by policy "
+            f"(scope=off); set {setup_mod.USER_NS_ENV}=own or all to include "
+            f"them")
 
 
 def _ask_log_params() -> tuple:
@@ -1636,7 +1725,8 @@ def _cmd_remotes_cli(cfg: dict, argv: list):
     if not repos:
         print_warn(f"There is no repo of instance '{who}' in {dest}.")
         for name, n in sorted((foreign or {}).items()):
-            print(f"  {DIM}({n} repos under this root belong to {name}){RESET}")
+            print(f"  {DIM}({_n(n, 'repo')} under this root "
+                  f"belong{'s' if n == 1 else ''} to {name}){RESET}")
         return
     rows = remotes.audit(repos, check_network=False, scope=scope)
     remotes.print_audit(rows)

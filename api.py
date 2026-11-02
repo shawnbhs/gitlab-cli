@@ -45,6 +45,7 @@
 # quiet=True, so not even an error line printed.
 
 import re
+import inspect
 import threading
 import time
 
@@ -391,6 +392,16 @@ def _total_header(res) -> "int | None":
     return int(raw) if raw.isdigit() else None
 
 
+def _accepts_record(fn) -> bool:
+    """Whether a request() callable takes `record=` (stubs may not)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "record" in params or any(
+        q.kind is inspect.Parameter.VAR_KEYWORD for q in params.values())
+
+
 def get_paginated(url: str, headers: dict, params: dict = None,
                   quiet: bool = False, max_pages: int = 200,
                   strict: bool = True) -> PagedResult:
@@ -425,7 +436,16 @@ def get_paginated(url: str, headers: dict, params: dict = None,
     while pages < max_pages:
         res = None
         for attempt in range(_RETRIES + 1):
-            res = request(url, headers, p, quiet=quiet)
+            # Only the FINAL attempt may print or record: a blip the retry
+            # recovers from is not a failure, and reporting it put a red ✖ on
+            # complete fetches and inflated every ledger-driven count.
+            final = attempt == _RETRIES
+            if final:
+                res = request(url, headers, p, quiet=quiet)
+            elif _accepts_record(request):
+                res = request(url, headers, p, quiet=True, record=False)
+            else:
+                res = request(url, headers, p, quiet=True)
             transient = (res is None) or (res.status_code in _RETRY_STATUSES)
             if not transient or attempt == _RETRIES:
                 break

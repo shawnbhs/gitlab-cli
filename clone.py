@@ -1327,7 +1327,7 @@ def _process_group(cfg: dict, group: dict, local_path: str,
                    depth: int = 0, errors: list = None, index: dict = None,
                    elsewhere: list = None, renamed: list = None,
                    pending: list = None, lfs_known: dict = None,
-                   known=None, root: str = None):
+                   known=None, root: str = None, lfs_retry: list = None):
     """
     Recursively clone — skip a project that is already cloned ANYWHERE under
     the destination, not merely at the path this layout would give it.
@@ -1346,7 +1346,9 @@ def _process_group(cfg: dict, group: dict, local_path: str,
 
     `lfs_known` maps abspath -> previous REASON_LFS row. A resumed run keeps
     such a row while the LFS contents are still missing, so the warning does
-    not vanish just because the repository itself is valid.
+    not vanish just because the repository itself is valid. Each such repo
+    gets one `git lfs pull` retry; the outcome is appended to `lfs_retry` as
+    {"project", "repaired", "code"} for the end-of-run summary.
 
     `known` / `root` are handed to try_rename_repair unchanged (tier-3
     orphan search; destination root for the D1/D3 move policy).
@@ -1361,6 +1363,8 @@ def _process_group(cfg: dict, group: dict, local_path: str,
         pending = []
     if lfs_known is None:
         lfs_known = {}
+    if lfs_retry is None:
+        lfs_retry = []
     group_pending = is_pending_deletion(group.get("full_path") or "")
 
     # NOT created eagerly any more: an empty `dest/<group>/` directory left by
@@ -1391,17 +1395,32 @@ def _process_group(cfg: dict, group: dict, local_path: str,
         if state == "ok":
             print_project(proj["path"], depth + 1)
             prior = lfs_known.get(os.path.abspath(target))
+            lfs_detail = ""
+            if prior is not None and _lfs_missing(target) is not False:
+                # Flagged LFS-incomplete last run: retry the content fetch
+                # once (never re-cloned), then measure again.
+                lfs_detail = gitlib._complete_lfs(
+                    target, proj["http_url_to_repo"], cfg.get("token") or "")
+            name = proj.get("path_with_namespace") or proj["path"]
             if prior is not None and _lfs_missing(target) is not False:
                 # Present and valid, but its LFS contents are still missing:
-                # keep the row so the warning stays visible. Never re-cloned.
+                # keep the row so the warning stays visible.
                 print(f"{YELLOW}skip ⚠{RESET} "
                       f"{DIM}present; LFS files still missing{RESET}")
                 _bump("lfs")
                 row = dict(prior)
                 row.update(project=proj["path"], path=target,
                            url=proj["http_url_to_repo"], reason=REASON_LFS)
+                if lfs_detail:
+                    row.update(detail=lfs_detail, code=_lfs_code(lfs_detail))
                 row.setdefault("code", "lfs_missing_object")
                 errors.append(row)
+                lfs_retry.append({"project": name, "repaired": False,
+                                  "code": row["code"]})
+            elif prior is not None:
+                print(f"{GREEN}LFS repaired ✓{RESET}")
+                lfs_retry.append({"project": name, "repaired": True,
+                                  "code": ""})
             else:
                 print(f"{DIM}skip ✓{RESET}")
             _remember(index, key, target)
@@ -1543,7 +1562,8 @@ def _process_group(cfg: dict, group: dict, local_path: str,
             print_subgroup(sg["full_path"], depth + 1)
         _process_group(cfg, sg, os.path.join(local_path, sg["path"]),
                        depth + 1, errors, index, elsewhere, renamed,
-                       pending, lfs_known, known=known, root=root)
+                       pending, lfs_known, known=known, root=root,
+                       lfs_retry=lfs_retry)
 
     return errors
 
@@ -1618,6 +1638,18 @@ def _print_lfs_notice(errors: list, limit: int = 10):
     print(f"   {DIM}{fix}{RESET}")
 
 
+def _print_lfs_retry_notice(lfs_retry: list):
+    """Per-repo outcome of retrying LFS for last run's LFS-incomplete repos."""
+    for r in lfs_retry or []:
+        if r.get("repaired"):
+            print(f"{GREEN}✔ LFS repaired: {r['project']}{RESET}")
+            continue
+        print(f"{YELLOW}⚠ LFS still missing: {r['project']}{RESET}")
+        fix = _fix_for(r.get("code") or "lfs_missing_object")
+        if fix:
+            print(f"   {DIM}→ {fix}{RESET}")
+
+
 def _print_pending_notice(pending: list):
     if pending:
         print(f"{DIM}{len(pending)} project(s) skipped — scheduled for deletion "
@@ -1660,6 +1692,7 @@ def cmd_clone(cfg: dict, group_path: str, dest: str = "."):
     elsewhere = []
     renamed = []
     pending = []
+    lfs_retry = []
 
     # Setup Ctrl+C handler to save errors before exit
     original_handler = signal.getsignal(signal.SIGINT)
@@ -1671,6 +1704,7 @@ def cmd_clone(cfg: dict, group_path: str, dest: str = "."):
                       _session_stats["failed"])
         _print_failure_summary(errors)
         _print_lfs_notice(errors)
+        _print_lfs_retry_notice(lfs_retry)
         _print_pending_notice(pending)
         _print_renamed_notice(renamed)
         _print_elsewhere_notice(elsewhere)
@@ -1736,12 +1770,14 @@ def cmd_clone(cfg: dict, group_path: str, dest: str = "."):
                                 index=index, elsewhere=elsewhere,
                                 renamed=renamed, pending=pending,
                                 lfs_known=lfs_known, known=known,
-                                root=os.path.abspath(dest or "."))
+                                root=os.path.abspath(dest or "."),
+                                lfs_retry=lfs_retry)
         _save_errors(dest, group_path, errors)
         print_summary(_session_stats["cloned"], _session_stats["pulled"],
                       _session_stats["failed"])
         _print_failure_summary(errors)
         _print_lfs_notice(errors)
+        _print_lfs_retry_notice(lfs_retry)
         _print_pending_notice(pending)
         _print_renamed_notice(renamed)
         _print_elsewhere_notice(elsewhere)
