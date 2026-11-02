@@ -1,6 +1,6 @@
 # tests/test_bulk_honesty.py — a bulk run's closing line must not overclaim.
 #
-# Seen live on roboshan: "✖ Host name did not resolve (git.internal) ...
+# Seen live on a real instance: "✖ Host name did not resolve (gitlab.example.com) ...
 # (groups/112/subgroups)" mid-run, then a green "✔ Clone All finished —
 # 1/1 groups." Three defects pinned here:
 #   1. API failures recorded during the run must turn the green tick into a
@@ -46,7 +46,7 @@ class BulkApiFailures(unittest.TestCase):
 
     def test_api_failure_during_run_replaces_the_green_tick(self):
         def run_one(_g):
-            api.record_failure(0, "Host name did not resolve (git.internal)",
+            api.record_failure(0, "Host name did not resolve (gitlab.example.com)",
                                URL, quiet=True)
             api.record_failure(503, "Service unavailable", URL, quiet=True)
         _r, out = _out(G._run_bulk, "Clone All", _groups("roboshan"), run_one)
@@ -54,7 +54,7 @@ class BulkApiFailures(unittest.TestCase):
         self.assertIn("Clone All finished with 2 API error(s)", out)
         self.assertIn("results may be incomplete", out)
         self.assertIn("reconnect the VPN and re-run", out)
-        self.assertIn("Host name did not resolve (git.internal)", out)
+        self.assertIn("Host name did not resolve (gitlab.example.com)", out)
         self.assertIn("groups/112/subgroups", out)
 
     def test_failures_from_before_the_run_are_not_blamed_on_it(self):
@@ -65,7 +65,7 @@ class BulkApiFailures(unittest.TestCase):
 
     def test_api_failures_are_listed_alongside_group_failures(self):
         def run_one(g):
-            api.record_failure(0, "Host name did not resolve (git.internal)",
+            api.record_failure(0, "Host name did not resolve (gitlab.example.com)",
                                URL, quiet=True)
             raise RuntimeError("boom")
         _r, out = _out(G._run_bulk, "Sync All", _groups("a"), run_one)

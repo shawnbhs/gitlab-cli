@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # tests/test_retry_ledger.py — a retry that recovers is not a failure.
 #
-# Seen live: Clone All on roboshan printed
-#   "✖  Host name did not resolve (git.internal) ... (groups/112/subgroups)"
+# Seen live: Clone All on a real instance printed
+#   "✖  Host name did not resolve (gitlab.example.com) ... (groups/112/subgroups)"
 # and then "✔ Clone All finished — 1/1 groups" with every project accounted
 # for. Both were true: the first attempt hit a DNS blip, the in-loop retry in
 # get_paginated() succeeded. But request() had already printed the error and
@@ -49,7 +49,7 @@ class RetryLedgerTests(unittest.TestCase):
             calls.append(url)
             if len(calls) <= fail_first:
                 raise api.requests.ConnectionError(
-                    "Failed to resolve 'git.internal'")
+                    "Failed to resolve 'gitlab.example.com'")
             return _Ok()
 
         api.requests.get = fake
@@ -58,7 +58,7 @@ class RetryLedgerTests(unittest.TestCase):
     def _run(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            res = api.get_paginated("http://git.internal/api/v4/groups/112/"
+            res = api.get_paginated("http://gitlab.example.com/api/v4/groups/112/"
                                     "subgroups", {}, strict=False)
         return res, out.getvalue()
 
