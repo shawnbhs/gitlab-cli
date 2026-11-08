@@ -4,7 +4,7 @@ Shape of the surface:
 
 * **Read tools** (``gitlab_instances`` … ``gitlab_local_status``) call
   :mod:`gitlab_mcp.reporting` and execute immediately. Reading is free.
-* **Write tools** (``gitlab_sync_local`` … ``gitlab_create_branch``) call
+* **Write tools** (``gitlab_sync_local`` … ``gitlab_create_project``) call
   :mod:`gitlab_mcp.actions` and are **two-call**. The first call returns a
   preview plus a single-use ``confirm_token`` and changes nothing; the agent
   must show that preview to the human and get an explicit approval before
@@ -347,6 +347,11 @@ def _description_hash(preview: dict) -> dict:
     """Pin ``mr_create`` to the exact description text the human previewed."""
     digest = preview.get("description_sha256")
     return {"description_sha256": digest} if digest else {}
+
+
+def _namespace_id(key: str) -> Callable[[dict], dict]:
+    """Pin a create to the group id the human previewed, not its path."""
+    return lambda preview: {key: preview[key]} if preview.get(key) else {}
 
 
 def _write(name: str, args: dict[str, Any], instance: str | None,
@@ -883,6 +888,48 @@ def _tool_create_branch(project: str, branch: str, ref: str,
     return _write("create_branch",
                   {"project": project, "branch": branch, "ref": ref},
                   instance, confirm_token)
+
+
+@_write_tool("gitlab_create_group")
+def _tool_create_group(name: str, path: str | None = None,
+                       parent: str | None = None, visibility: str = "private",
+                       instance: str | None = None,
+                       confirm_token: str | None = None) -> dict:
+    """Create a group, or a subgroup when `parent` (the parent group's full
+    path) is given. REQUIRES USER CONFIRMATION.
+
+    `path` defaults to one derived from `name`; pass it explicitly for a
+    non-Latin name. `visibility` is private (default), internal or public.
+    Call once without `confirm_token` for a preview, get the user's explicit
+    approval, then call again with identical arguments plus the token.
+    """
+    return _write("create_group",
+                  {"name": name, "path": path, "parent": parent,
+                   "visibility": visibility},
+                  instance, confirm_token, pin=_namespace_id("parent_id"))
+
+
+@_write_tool("gitlab_create_project")
+def _tool_create_project(name: str, namespace: str | None = None,
+                         path: str | None = None, visibility: str = "private",
+                         description: str = "",
+                         initialize_with_readme: bool = False,
+                         instance: str | None = None,
+                         confirm_token: str | None = None) -> dict:
+    """Create a project (repository) in `namespace` (a group/subgroup full
+    path; default: the token user's own namespace). REQUIRES USER
+    CONFIRMATION.
+
+    `path` defaults to one derived from `name`. `visibility` is private
+    (default), internal or public. Call once without `confirm_token` for a
+    preview, get the user's explicit approval, then call again with identical
+    arguments plus the token.
+    """
+    return _write("create_project",
+                  {"name": name, "namespace": namespace, "path": path,
+                   "visibility": visibility, "description": description,
+                   "initialize_with_readme": initialize_with_readme},
+                  instance, confirm_token, pin=_namespace_id("namespace_id"))
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

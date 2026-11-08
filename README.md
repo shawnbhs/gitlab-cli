@@ -202,6 +202,8 @@ gitlab-cli sync    <group> [dir]    # smart sync
 gitlab-cli log     <group> [since] [author] [dir]
 gitlab-cli remotes [dir] [--fix]    # audit remotes (active instance only)
 gitlab-cli harden-perms [--dry-run] [root ...]
+gitlab-cli report create-group   NAME [--path] [--parent] [--visibility]
+gitlab-cli report create-project NAME [--namespace] [--path] [--visibility] [--description] [--readme]
 gitlab-cli --help                   # this list
 ```
 
@@ -215,6 +217,30 @@ day to day; it is what you attach to a bug report.
 Retrying failed projects and browsing the error log are available from
 the interactive menu (a group with leftover errors is marked `⚠` and
 offers a **Retry** action; the main menu has an **Error Log** section).
+
+### Creating groups and projects
+
+Main-menu entry **6. Create** makes a new group, subgroup or project on
+the **active** instance. To create on another instance, press `b` first
+and switch. It asks for:
+
+- the type: `g` top-level group, `s` subgroup, `p` project
+- the name, and a path (Enter derives one from the name)
+- for a subgroup: the parent group's full path (required)
+- for a project: the group/subgroup full path (Enter = your own
+  namespace), an optional description, and whether to start with a README
+- the visibility: `private` (the default), `internal` or `public`
+
+It then runs the same `gitlab-cli report create-group` /
+`create-project` command, so the preview, the already-exists check and
+the `Proceed? [y/N]` question are identical (see
+[docs/CLI.md](docs/CLI.md#write-commands)). From the shell:
+
+```bash
+gitlab-cli report create-group "Example Team" --path example-team
+gitlab-cli report create-group backend --parent example-team
+gitlab-cli report create-project service-a --namespace example-team/backend --readme
+```
 
 ### Clearing out entries you can no longer act on
 

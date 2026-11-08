@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-11-08
+
+Groups, subgroups and projects can now be created from the menu, the shell
+and the MCP server, with the same preview-then-confirm flow as every other
+write.
+
+### Added
+
+- **`6. Create` in the interactive menu** creates a group, a subgroup (a group
+  with a parent) or a project. It asks for the name, an optional path, the
+  parent group or namespace, and the visibility (Enter = `private`), then runs
+  the matching `report` command so the preview and `Proceed? [y/N]` prompt are
+  the same as on the shell.
+- **`gitlab-cli report create-group <name>`** creates a group, or a subgroup
+  with `--parent <group-full-path>`. Takes `--path` and `--visibility`.
+- **`gitlab-cli report create-project <name>`** creates a project in
+  `--namespace <group-full-path>` (default: your own namespace). Takes
+  `--path`, `--visibility`, `--description` and `--readme` (initialise with a
+  README, which gives the repository a `main` branch).
+- **MCP write tools `gitlab_create_group` and `gitlab_create_project`.** Like
+  every MCP write they are two calls: the first returns a preview and a
+  single-use confirmation token bound to the exact arguments and changes
+  nothing; `GITLAB_MCP_READ_ONLY` rejects both.
+
+### Security
+
+- **Visibility defaults to `private`** on every path (menu, `report`, MCP).
+  Only `private`, `internal` and `public` are accepted, and a `public` preview
+  warns that anyone on the internet can read it.
+- **Paths are validated before any request is made.** A path must follow
+  GitLab's rule (letters, digits, `_`, `-`, `.`; start and end with a letter,
+  digit or `_`; not ending in `.git` or `.atom`; at most 255 characters). When
+  `--path` is omitted it is derived from the name (`My Team` -> `my-team`); a
+  name with no Latin letters (Persian, say) is refused with a request for an
+  explicit path rather than a guess. The parent group or namespace must exist,
+  or the preview fails.
+
+---
+
 ## [1.2.0] - 2026-10-26
 
 The MCP server moved into this repository, and every error screen learned to

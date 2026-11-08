@@ -123,10 +123,50 @@ confirm_token`. Every one also takes the optional parameters `instance` and
 | `gitlab_mr_merge` | **`project`**, **`iid`**, `squash=null`, `remove_source_branch=false` | **Merges a merge request.** This is the most destructive tool. When `squash` is `null`, the project's own default applies. |
 | `gitlab_issue_comment` | **`project`**, **`iid`**, **`body`**, `allow_quick_actions=false` | Posts a comment on an issue. |
 | `gitlab_create_branch` | **`project`**, **`branch`**, **`ref`** | Creates a branch from an existing ref. |
+| `gitlab_create_group` | **`name`**, `path=null`, `parent=null`, `visibility="private"` | Creates a top-level group, or a subgroup when `parent` (the parent group's full path) is given. |
+| `gitlab_create_project` | **`name`**, `namespace=null`, `path=null`, `visibility="private"`, `description=""`, `initialize_with_readme=false` | Creates a project (repository) in `namespace`, a group or subgroup full path. With no `namespace` it goes into the token user's own namespace. `initialize_with_readme=true` gives the repository a first commit and a default branch. |
 
 Branch and ref arguments are checked with gitlab-cli's `git.check_ref`.
 Names such as `-orphan`, ` -c` or `--upload-pack=…` are rejected before any
 request is made.
+
+Notes on `gitlab_create_group` and `gitlab_create_project`:
+
+* `path` is the URL slug. When it is left out it is derived from `name`, so
+  `Team A` becomes `team-a`. A name with no Latin letters, a Persian name
+  for example, gives no slug. The preview then fails and asks for an explicit
+  `path` rather than guessing one.
+* `path` must follow GitLab's own rule: letters, digits, `_`, `-` and `.`;
+  it starts and ends with a letter, digit or `_`; it does not end in `.git`
+  or `.atom`. `name` is capped at 255 characters. A bad value is refused in
+  the preview, before any request is made.
+* `visibility` is `private`, `internal` or `public`. Anything else is
+  refused. `public` sets `danger: true` on the preview and adds a warning
+  that anyone on the internet can read it.
+* The preview checks that `parent` or `namespace` exists, and returns its
+  numeric id. It also checks whether the full path is already taken: a group
+  or project that already exists makes the preview `ok: false`, so the call
+  cannot be confirmed. For a project in your personal namespace that check is
+  not made, and the preview shows the path as
+  `<your personal namespace>/<path>`.
+* The preview shows the request that will be sent (`POST /groups` or
+  `POST /projects`), with `name`, `path`, `full_path`, `visibility` and, for a
+  project, `description` and `initialize_with_readme`. The `description` is
+  capped at 100,000 characters (`MAX_BODY_CHARS`), the same cap as a comment
+  body.
+* The `done` result carries the new `id`, `full_path`, `visibility` and
+  `web_url`. A project also returns `http_url_to_repo` and `ssh_url_to_repo`.
+
+For example, a subgroup and then a project inside it:
+
+```json
+{"name": "Team A", "parent": "group-a"}
+{"name": "api", "namespace": "group-a/team-a", "initialize_with_readme": true}
+```
+
+Each of these is a separate two-call write: the first call returns the
+preview and a `confirm_token`, the second repeats the same arguments plus the
+token.
 
 ---
 
@@ -529,5 +569,12 @@ Later change (2026-10-11): `server._read_only()` now delegates to
 Re-checked for 1.2.0 (2026-10-26): `gitlab-cli mcp` exists in
 `gitlab_cli.py`, the HTTP gate covers `POST`, `PUT` and `DELETE`
 (`GitLabContext.post`, `.put` and `.delete` all call `_ensure_writable`), and
-the registration commands above were exercised over stdio. Re-run the
-introspection after any later change to `server.py`.
+the registration commands above were exercised over stdio.
+
+Re-checked for 1.3.0 (2026-11-08 14:10, UTC-07:00): `list_tools()` returns
+29 tools, of which 12 are write tools. The two new ones are
+`gitlab_create_group` and `gitlab_create_project`, with the parameters and
+defaults in the write table above. Their behaviour comes from reading
+`preview_create_group`, `do_create_group`, `preview_create_project` and
+`do_create_project` in `actions.py`. Re-run the introspection after any
+later change to `server.py`.

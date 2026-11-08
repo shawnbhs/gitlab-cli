@@ -987,7 +987,7 @@ def pick_main_menu(cfg: dict, info: dict) -> str:
     print(f"\n{BOLD}{WHITE}  Which section do you want?{RESET}\n")
     print(f"  {CYAN}1.{RESET}  📁  Master Groups  — clone, sync, log projects")
 
-    valid = ["1", "3", "4", "5", "b", "q"]
+    valid = ["1", "3", "4", "5", "6", "b", "q"]
 
     if caps.can(info, "members"):
         print(f"  {CYAN}2.{RESET}  👥  Members        — members, activity, access")
@@ -998,6 +998,7 @@ def pick_main_menu(cfg: dict, info: dict) -> str:
     print(f"  {CYAN}3.{RESET}  🔗  Remotes        — audit the remotes of every repo")
     print(f"  {CYAN}4.{RESET}  🩺  Doctor         — health check of config and token")
     print(f"  {CYAN}5.{RESET}  ⚠️   Error Log      — errors and how to fix them{err_mark}")
+    print(f"  {CYAN}6.{RESET}  ➕  Create         — new group, subgroup or project")
     print(f"  {YELLOW}b.{RESET}  🔄  Instances      — switch / add a GitLab")
     print(f"\n  {YELLOW}q{RESET}  exit\n")
 
@@ -1364,6 +1365,11 @@ def interactive_mode(cfg: dict):
             cmd_errors(cfg)
             continue
 
+        if section == "6":
+            _guarded("interactive :: create", cmd_create, cfg)
+            _ask_next()
+            continue
+
         if section == "b":
             new_cfg = pick_instance()
             if new_cfg:
@@ -1645,6 +1651,76 @@ def _ask_log_params() -> tuple:
     except (KeyboardInterrupt, EOFError):
         sys.exit(0)
     return since, author
+
+
+def create_argv(kind: str, answers: dict) -> list[str]:
+    """argv for `gitlab-cli report create-*` from the interactive answers.
+
+    kind: "g" group, "s" subgroup, "p" project. Empty answers are dropped so
+    the report CLI applies its own defaults (derived path, private, ...).
+    No --instance: the menu's cfg is always the active instance, which is
+    exactly what the report CLI resolves by default (same token lookup).
+    Values go as --opt=value and the name after "--", so input starting with
+    "-" is data, never a flag.
+    """
+    cmd = "create-project" if kind == "p" else "create-group"
+    argv = [cmd]
+    flag = {"path": "--path", "parent": "--parent", "namespace": "--namespace",
+            "visibility": "--visibility", "description": "--description"}
+    for key, opt in flag.items():
+        if answers.get(key):
+            argv.append(f"{opt}={answers[key]}")
+    if kind == "p" and answers.get("readme"):
+        argv.append("--readme")
+    return argv + ["--", answers["name"]]
+
+
+def cmd_create(cfg: dict) -> int:
+    """Interactive create: group, subgroup or project on the active instance.
+
+    Delegates to the `report` write path, so the preview, the duplicate check
+    and the Proceed? [y/N] prompt are the exact ones the shell command uses.
+    """
+    name_of = cfg.get("name") or cfg.get("url")
+    print(f"\n{BOLD}➕ Create on {name_of}{RESET}\n")
+    print(f"  {CYAN}g{RESET}  top-level group")
+    print(f"  {CYAN}s{RESET}  subgroup (inside an existing group)")
+    print(f"  {CYAN}p{RESET}  project / repository\n")
+
+    def ask(prompt: str) -> str:
+        try:
+            return input(f"{BOLD}  {prompt}: {RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+
+    kind = ask("Type [g/s/p]").lower()
+    if kind not in ("g", "s", "p"):
+        print_warn("  Cancelled.")
+        return 0
+    a: dict = {"name": ask("Name")}
+    if not a["name"]:
+        print_warn("  Cancelled.")
+        return 0
+    a["path"] = ask("Path (Enter = derive from name)")
+    if kind == "s":
+        a["parent"] = ask("Parent group full path (e.g. team/sub)")
+        if not a["parent"]:
+            print_warn("  A subgroup needs a parent. Cancelled.")
+            return 0
+    if kind == "p":
+        a["namespace"] = ask("Group/subgroup full path (Enter = your own namespace)")
+        a["description"] = ask("Description (optional)")
+        a["readme"] = ask("Initialise with a README? [y/N]").lower() == "y"
+    a["visibility"] = ask("Visibility [private/internal/public] (Enter = private)").lower()
+    if a["visibility"] not in ("", "private", "internal", "public"):
+        print_warn(f"  Unknown visibility {a['visibility']!r}. Cancelled.")
+        return 0
+
+    from gitlab_mcp import cli as report_cli
+    try:
+        return report_cli.main(create_argv(kind, a))
+    except SystemExit as exc:       # argparse refusal must not end the menu
+        return exc.code if isinstance(exc.code, int) else 1
 
 
 def _ask_next():

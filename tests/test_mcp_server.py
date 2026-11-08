@@ -47,7 +47,7 @@ _REPORTING_FUNCTIONS = (
 _ACTION_NAMES = (
     "sync_local", "clone_missing", "mr_comment", "mr_review_comment",
     "mr_approve", "mr_unapprove", "mr_create", "mr_merge", "issue_comment",
-    "create_branch",
+    "create_branch", "create_group", "create_project",
 )
 
 
@@ -406,6 +406,51 @@ class TwoStepFlowTests(ServerTestCase):
         self.assertEqual(res["type"], "ValueError")
         self.assertIn("must not be empty", res["error"])
 
+    def test_create_group_previews_then_executes_with_the_token(self) -> None:
+        mocks = self.patch_action(
+            "create_group",
+            preview=ok_preview("create_group", full_path="group-a/team-a"),
+            do={"action": "create_group", "ok": True, "id": 42,
+                "full_path": "group-a/team-a"})
+
+        first = server_mod._tool_create_group("Team A", parent="group-a")
+        self.assertEqual(first["status"], "needs_confirmation")
+        mocks["do"].assert_not_called()
+
+        second = server_mod._tool_create_group(
+            "Team A", parent="group-a", confirm_token=first["confirm_token"])
+
+        self.assertEqual(second["status"], "done")
+        self.assertEqual(second["result"]["id"], 42)
+        mocks["do"].assert_called_once()
+        _, kwargs = mocks["do"].call_args
+        self.assertEqual(kwargs["name"], "Team A")
+        self.assertEqual(kwargs["parent"], "group-a")
+        self.assertEqual(kwargs["visibility"], "private")
+
+    def test_create_project_previews_then_executes_with_the_token(self) -> None:
+        mocks = self.patch_action(
+            "create_project",
+            preview=ok_preview("create_project", full_path="group-a/api"),
+            do={"action": "create_project", "ok": True, "id": 7,
+                "full_path": "group-a/api"})
+
+        first = server_mod._tool_create_project(
+            "api", namespace="group-a", initialize_with_readme=True)
+        self.assertEqual(first["status"], "needs_confirmation")
+        mocks["do"].assert_not_called()
+
+        second = server_mod._tool_create_project(
+            "api", namespace="group-a", initialize_with_readme=True,
+            confirm_token=first["confirm_token"])
+
+        self.assertEqual(second["status"], "done")
+        self.assertEqual(second["result"]["id"], 7)
+        mocks["do"].assert_called_once()
+        _, kwargs = mocks["do"].call_args
+        self.assertEqual(kwargs["namespace"], "group-a")
+        self.assertTrue(kwargs["initialize_with_readme"])
+
 
 class MergeShaPinningTests(ServerTestCase):
     """``mr_merge`` merges the commit the human previewed, or nothing."""
@@ -483,6 +528,8 @@ class ReadOnlyModeTests(ServerTestCase):
                     "p", 1, "b"),
                 "create_branch": lambda: server_mod._tool_create_branch(
                     "p", "feature", "main"),
+                "create_group": lambda: server_mod._tool_create_group("g"),
+                "create_project": lambda: server_mod._tool_create_project("p"),
             }
             self.assertEqual(sorted(calls), sorted(_ACTION_NAMES))
             for name, call in calls.items():

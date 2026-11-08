@@ -303,6 +303,44 @@ class TestParsing(unittest.TestCase):
                            "main"])
         self.assertEqual((args.branch, args.ref), ("feature", "main"))
 
+    def test_create_group_defaults(self) -> None:
+        args = self.parse(["create-group", "Team A"])
+        self.assertEqual((args.name, args.path, args.parent, args.visibility),
+                         ("Team A", None, None, "private"))
+
+    def test_create_group_parent_and_path(self) -> None:
+        args = self.parse(["create-group", "Team A", "--parent", "group-a",
+                           "--path", "team-a"])
+        self.assertEqual((args.parent, args.path), ("group-a", "team-a"))
+
+    def test_create_project_defaults(self) -> None:
+        args = self.parse(["create-project", "api"])
+        self.assertEqual(
+            (args.name, args.namespace, args.path, args.visibility,
+             args.description, args.readme),
+            ("api", None, None, "private", "", False))
+
+    def test_create_project_namespace_and_readme(self) -> None:
+        args = self.parse(["create-project", "api", "--namespace",
+                           "group-a/team-a", "--readme"])
+        self.assertEqual((args.namespace, args.readme),
+                         ("group-a/team-a", True))
+
+    def test_create_visibility_accepts_each_choice(self) -> None:
+        for command in ("create-group", "create-project"):
+            for vis in ("private", "internal", "public"):
+                with self.subTest(command=command, visibility=vis):
+                    args = self.parse([command, "x", "--visibility", vis])
+                    self.assertEqual(args.visibility, vis)
+
+    def test_create_visibility_rejects_other_values(self) -> None:
+        for command in ("create-group", "create-project"):
+            with self.subTest(command=command):
+                with redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        self.parse([command, "x", "--visibility", "secret"])
+                self.assertEqual(caught.exception.code, 2)
+
     def test_common_flags_accepted_before_the_command(self) -> None:
         args = self.parse(["--instance", "example", "--json", "--yes",
                            "groups"])
@@ -425,6 +463,11 @@ class TestSignatureConformance(unittest.TestCase):
             "mr-merge": ["mr-merge", "group-a/project-a", "7"],
             "issue-comment": ["issue-comment", "group-a/project-a", "3", "ok"],
             "create-branch": ["create-branch", "group-a/project-a", "f", "main"],
+            "create-group": ["create-group", "Team A", "--parent", "group-a",
+                             "--path", "team-a", "--visibility", "internal"],
+            "create-project": ["create-project", "api", "--namespace",
+                               "group-a/team-a", "--path", "api",
+                               "--description", "d", "--readme"],
         }
         self.assertEqual(set(sample), set(cli.WRITE_SPECS))
 
@@ -833,6 +876,83 @@ class TestWriteFlow(unittest.TestCase):
                 code = cli.main(["mr-merge", "group-a/project-a", "7", "--yes"])
         self.assertEqual(code, 0)
         self.assertEqual(do_mock.call_count, 1)
+
+    def test_create_group_not_ok_preview_exits_one_even_with_yes(self) -> None:
+        _, do_mock = self.patch_pair(
+            "create_group",
+            preview("create_group", ok=False,
+                    reasons=["group 'group-a/team-a' already exists"]))
+        code, _, err = run_cli(
+            ["create-group", "Team A", "--parent", "group-a", "--yes"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        do_mock.assert_not_called()
+
+    def test_create_project_not_ok_preview_exits_one_even_with_yes(self) -> None:
+        _, do_mock = self.patch_pair(
+            "create_project",
+            preview("create_project", ok=False,
+                    reasons=["project 'group-a/api' already exists"]))
+        code, _, err = run_cli(
+            ["create-project", "api", "--namespace", "group-a", "--yes"])
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+        do_mock.assert_not_called()
+
+    def test_create_group_yes_calls_do_with_every_field(self) -> None:
+        preview_mock, do_mock = self.patch_pair(
+            "create_group", preview("create_group"),
+            {"action": "create_group", "ok": True, "id": 77,
+             "full_path": "group-a/team-a"})
+        code, out, err = run_cli(
+            ["create-group", "Team A", "--parent", "group-a",
+             "--visibility", "internal", "--yes"])
+        self.assertEqual(code, 0, msg=err)
+        expected = {"name": "Team A", "path": None, "parent": "group-a",
+                    "visibility": "internal"}
+        self.assertEqual(preview_mock.call_args.kwargs, expected)
+        self.assertEqual(do_mock.call_count, 1)
+        self.assertEqual(do_mock.call_args.kwargs, expected)
+        self.assertIn("group-a/team-a", out)
+
+    def test_create_project_yes_calls_do_with_every_field(self) -> None:
+        _, do_mock = self.patch_pair(
+            "create_project", preview("create_project"),
+            {"action": "create_project", "ok": True, "id": 88})
+        code, _, err = run_cli(
+            ["create-project", "api", "--namespace", "group-a/team-a",
+             "--path", "api-svc", "--visibility", "public",
+             "--description", "the api", "--readme", "--yes"])
+        self.assertEqual(code, 0, msg=err)
+        self.assertEqual(do_mock.call_count, 1)
+        self.assertEqual(do_mock.call_args.kwargs, {
+            "name": "api", "namespace": "group-a/team-a", "path": "api-svc",
+            "visibility": "public", "description": "the api",
+            "initialize_with_readme": True})
+
+    def test_create_project_defaults_reach_do(self) -> None:
+        _, do_mock = self.patch_pair("create_project",
+                                     preview("create_project"))
+        run_cli(["create-project", "api"], answers=["y"])
+        self.assertEqual(do_mock.call_args.kwargs, {
+            "name": "api", "namespace": None, "path": None,
+            "visibility": "private", "description": "",
+            "initialize_with_readme": False})
+
+    def test_create_group_decline_does_not_call_do(self) -> None:
+        _, do_mock = self.patch_pair("create_group", preview("create_group"))
+        code, out, _ = run_cli(["create-group", "Team A"], answers=["n"])
+        self.assertEqual(code, 0)
+        self.assertIn("cancelled", out)
+        do_mock.assert_not_called()
+
+    def test_create_project_decline_does_not_call_do(self) -> None:
+        _, do_mock = self.patch_pair("create_project",
+                                     preview("create_project"))
+        code, out, _ = run_cli(["create-project", "api"], answers=[""])
+        self.assertEqual(code, 0)
+        self.assertIn("cancelled", out)
+        do_mock.assert_not_called()
 
     def test_sync_routes_to_sync_local(self) -> None:
         _, do_mock = self.patch_pair("sync_local", preview("sync_local"))

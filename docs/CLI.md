@@ -150,9 +150,28 @@ Each write command previews, asks, and then acts.
 | `mr-merge PROJECT IID [--squash\|--no-squash] [--remove-source-branch]` | Merges the MR, pinned to the previewed sha. |
 | `issue-comment PROJECT IID [BODY] [--body-file FILE] [--allow-quick-actions]` | Posts a comment on an issue. |
 | `create-branch PROJECT BRANCH REF` | Creates a branch from an existing ref. |
+| `create-group NAME [--path P] [--parent GROUP] [--visibility private\|internal\|public]` | Creates a top-level group, or a subgroup of `GROUP` (its full path) with `--parent`. |
+| `create-project NAME [--namespace GROUP] [--path P] [--visibility private\|internal\|public] [--description T] [--readme]` | Creates a project (repository) in `GROUP` (a group/subgroup full path). Without `--namespace` it goes into your own namespace. |
 
 `--squash` and `--no-squash` form a tri-state. If you pass neither, the
 project's own default applies.
+
+**Creating groups and projects.** `--visibility` defaults to `private`.
+`--path` defaults to one derived from `NAME` (`My Team` becomes `my-team`).
+A name with no Latin letters, such as a Persian one, gives no usable path,
+so the preview refuses and asks for `--path`. A path must use letters,
+digits, `_`, `-` and `.`, start and end with a letter, digit or `_`, and
+not end in `.git` or `.atom`. The preview refuses if the group or project
+already exists, or if `--parent`/`--namespace` is not found. `public`
+visibility is previewed with a `DANGER` warning. `--readme` gives the new
+repository a first commit and a default branch; without it the project is
+empty.
+
+```bash
+gitlab-cli report create-group "Example Team" --path example-team
+gitlab-cli report create-group backend --parent example-team
+gitlab-cli report create-project service-a --namespace example-team/backend \n    --description "Example service" --readme
+```
 
 **Quick actions.** Some lines in a body or description start with a GitLab
 slash command, such as `/merge`, `/approve` or `/assign_reviewer`. By

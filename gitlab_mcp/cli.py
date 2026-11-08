@@ -404,7 +404,8 @@ def _print_preview(preview: dict, stream: Any = None) -> None:
     print(paint(f"── preview: {action} ──", BOLD, stream), file=stream)
     print(terminal_safe(preview.get("summary", "")), file=stream)
 
-    if preview.get("danger"):
+    # A public create's danger is spelled out by its own warning line.
+    if preview.get("danger") and not str(action).startswith("create_"):
         target = (preview.get("target_branch") or preview.get("branch")
                   or preview.get("project") or action)
         target = terminal_safe_line(target)
@@ -445,6 +446,8 @@ def confirm_write(command: str, preview: dict, assume_yes: bool,
     irreversible one cannot.
     """
     stream = stream or sys.stdout
+    if command.startswith("create-") and preview.get("danger"):
+        assume_yes = False          # a public create is always asked
     if command == "mr-merge" and preview.get("danger"):
         target = str(preview.get("target_branch") or "").strip()
         if not target:
@@ -653,6 +656,10 @@ _PINNED_FROM_PREVIEW: dict[str, Callable[[dict], dict]] = {
     "mr-approve": lambda p: {"sha": p.get("sha")},
     "mr-create": lambda p: ({"description_sha256": p["description_sha256"]}
                             if p.get("description_sha256") else {}),
+    "create-group": lambda p: ({"parent_id": p["parent_id"]}
+                               if p.get("parent_id") else {}),
+    "create-project": lambda p: ({"namespace_id": p["namespace_id"]}
+                                 if p.get("namespace_id") else {}),
 }
 
 
@@ -694,6 +701,15 @@ WRITE_SPECS: dict[str, tuple[str, Callable[[argparse.Namespace], dict]]] = {
     "create-branch": ("create_branch",
                       lambda a: {"project": a.project, "branch": a.branch,
                                  "ref": a.ref}),
+    "create-group": ("create_group",
+                     lambda a: {"name": a.name, "path": a.path,
+                                "parent": a.parent,
+                                "visibility": a.visibility}),
+    "create-project": ("create_project",
+                       lambda a: {"name": a.name, "namespace": a.namespace,
+                                  "path": a.path, "visibility": a.visibility,
+                                  "description": a.description or "",
+                                  "initialize_with_readme": a.readme}),
 }
 
 
@@ -750,6 +766,8 @@ _EPILOG = f"""examples:
   {PROG} mr group-a/project-a 7
   {PROG} mr-comment group-a/project-a 7 "looks good to me"
   {PROG} mr-merge group-a/project-a 7      # into main: type the branch name
+  {PROG} create-group "Team A" --parent group-a
+  {PROG} create-project api --namespace group-a/team-a --readme
 
 every command that changes something prints a preview first and asks
 Proceed? [y/N]. --yes skips the question, except a merge into a
@@ -965,6 +983,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project")
     p.add_argument("branch")
     p.add_argument("ref")
+
+    vis = dict(choices=("private", "internal", "public"), default="private")
+    p = add("create-group", "[write] create a group, or a subgroup with --parent")
+    p.add_argument("name")
+    p.add_argument("--path", default=None,
+                   help="URL path (default: derived from the name)")
+    p.add_argument("--parent", default=None,
+                   help="full path of the parent group (makes a subgroup)")
+    p.add_argument("--visibility", **vis)
+
+    p = add("create-project", "[write] create a project (repository)")
+    p.add_argument("name")
+    p.add_argument("--namespace", default=None,
+                   help="group/subgroup full path (default: your own namespace)")
+    p.add_argument("--path", default=None,
+                   help="URL path (default: derived from the name)")
+    p.add_argument("--visibility", **vis)
+    p.add_argument("--description", default="")
+    p.add_argument("--readme", action="store_true",
+                   help="initialise with a README (gives the repo a main branch)")
 
     return parser
 

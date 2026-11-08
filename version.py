@@ -18,7 +18,7 @@
 # a new user-namespace setting arrived off by default, and config.py was
 # deleted — a module nothing imported, so no documented interface broke.
 # Additive plus a narrowing of a dangerous default = MINOR.
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Short form for the banner, which has a fixed-width box to fit.
 __version_short__ = ".".join(__version__.split(".")[:2])

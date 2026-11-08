@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import unicodedata
 from typing import Any
 from urllib.parse import quote
 
@@ -1104,3 +1105,193 @@ def do_create_branch(ctx: Any, project: str | int, branch: str,
         "commit": ((res or {}).get("commit") or {}).get("id"),
         "web_url": (res or {}).get("web_url"),
     }
+
+
+# ─── create_group / create_project ────────────────────────────────────────────
+
+# GitLab's own rule for a group/project path: letters, digits, ``_``, ``-``
+# and ``.``; must start with a letter, digit or ``_``; must not end in
+# ``.git``/``.atom`` or with ``-``/``.``. Checked here so a bad path is
+# refused in the preview, before any request is made.
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?$")
+MAX_NAME_CHARS = 255
+VISIBILITIES = ("private", "internal", "public")
+
+
+def _slug_from(name: str) -> str:
+    """Best-effort path from a name: ``My Team`` -> ``my-team``.
+
+    A name with no Latin letters (Persian, say) yields ``""``; the preview
+    then asks for an explicit ``path`` instead of guessing one.
+    """
+    ascii_ = unicodedata.normalize("NFKD", name).encode("ascii", "ignore")
+    slug = re.sub(r"[^a-z0-9_.-]+", "-", ascii_.decode().lower())
+    return re.sub(r"[-_.]{2,}", "-", slug).strip("-._")
+
+
+def _require_slug(value: Any, field: str = "path") -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    slug = value.strip()
+    low = slug.lower()
+    if (len(slug) > MAX_NAME_CHARS or not _SLUG_RE.match(slug)
+            or low.endswith((".git", ".atom"))):
+        raise ValueError(
+            f"{field} {slug!r} is not a valid GitLab path (letters, digits, "
+            f"'_', '-', '.'; start/end with a letter, digit or '_'; not "
+            f"ending in .git/.atom)")
+    return slug
+
+
+def _require_visibility(value: Any) -> str:
+    vis = str(value or "private").strip().lower()
+    if vis not in VISIBILITIES:
+        raise ValueError(f"visibility must be one of {', '.join(VISIBILITIES)}")
+    return vis
+
+
+def _resolve_path(name: str, path: str | None) -> str:
+    name = _require_text(name, "name", MAX_NAME_CHARS).strip()
+    if path is not None and str(path).strip():
+        return _require_slug(path)
+    slug = _slug_from(name)
+    if not slug:
+        raise ValueError(f"cannot derive a path from name {name!r}; "
+                         f"pass path explicitly")
+    return _require_slug(slug)
+
+
+def _namespace(ctx: Any, ref: str, kind: str) -> dict:
+    """``{id, full_path}`` of an existing group/namespace. Raises if absent."""
+    ref = _require_path(ref, kind).strip("/")
+    # ``.``/``..`` are not percent-encoded and would be normalised into a
+    # different endpoint (``/groups/..`` -> ``/api/v4/``).
+    if any(seg in ("", ".", "..") for seg in ref.split("/")):
+        raise ValueError(f"{kind} {ref!r} is not a valid group path")
+    if kind == "parent":
+        data = ctx.get(f"/groups/{quote(ref, safe='')}",
+                       {"with_projects": "false"})
+    else:
+        data = ctx.get(f"/namespaces/{quote(ref, safe='')}")
+    if not isinstance(data, dict) or not data.get("id"):
+        raise ValueError(f"{kind} {ref!r} not found")
+    return {"id": int(data["id"]),
+            "full_path": str(data.get("full_path") or ref)}
+
+
+def _exists(ctx: Any, path: str, params: dict | None = None) -> bool:
+    """True if GitLab has ``path``. Only a 404 means "no": a 401/403/network
+    error propagates, so a preview never reports "no conflict" unchecked."""
+    from .context import GitLabNotFoundError
+    try:
+        return bool(ctx.get(path, params) if params else ctx.get(path))
+    except GitLabNotFoundError:
+        return False
+
+
+def _visibility_warnings(vis: str) -> list[str]:
+    return ([f"visibility is 'public': anyone on the internet can read it"]
+            if vis == "public" else [])
+
+
+def preview_create_group(ctx: Any, name: str, path: str | None = None,
+                         parent: str | None = None,
+                         visibility: str = "private") -> dict:
+    """Describe the group (or, with ``parent``, the subgroup) to be created."""
+    slug = _resolve_path(name, path)
+    vis = _require_visibility(visibility)
+    par = _namespace(ctx, parent, "parent") if parent else None
+    full = f"{par['full_path']}/{slug}" if par else slug
+    reasons = []
+    if _exists(ctx, f"/groups/{quote(full, safe='')}", {"with_projects": "false"}):
+        reasons.append(f"group '{full}' already exists")
+    kind = "subgroup" if par else "top-level group"
+    return _preview(
+        "create_group", f"Create {kind} '{full}' ({vis}) named {name.strip()!r}.",
+        ok=not reasons, danger=vis == "public", reasons=reasons,
+        warnings=_visibility_warnings(vis), name=name.strip(), path=slug,
+        full_path=full, parent=par["full_path"] if par else None,
+        parent_id=par["id"] if par else None, visibility=vis,
+        endpoint="POST /groups")
+
+
+def do_create_group(ctx: Any, name: str, path: str | None = None,
+                    parent: str | None = None,
+                    visibility: str = "private",
+                    parent_id: int | None = None) -> dict:
+    """Create a group, or a subgroup when ``parent`` is given.
+
+    ``parent_id`` is pinned from the preview by the caller, so a group renamed
+    or replaced between preview and confirm cannot redirect the create.
+    """
+    slug = _resolve_path(name, path)
+    vis = _require_visibility(visibility)
+    body: dict[str, Any] = {"name": name.strip(), "path": slug,
+                            "visibility": vis}
+    if parent:
+        body["parent_id"] = parent_id or _namespace(ctx, parent, "parent")["id"]
+    res = ctx.post("/groups", body) or {}
+    return {"action": "create_group", "ok": True, "id": res.get("id"),
+            "full_path": res.get("full_path", slug),
+            "visibility": res.get("visibility", vis),
+            "web_url": res.get("web_url")}
+
+
+def preview_create_project(ctx: Any, name: str, namespace: str | None = None,
+                           path: str | None = None,
+                           visibility: str = "private",
+                           description: str = "",
+                           initialize_with_readme: bool = False) -> dict:
+    """Describe the project (repository) to be created."""
+    slug = _resolve_path(name, path)
+    vis = _require_visibility(visibility)
+    if description and len(description) > MAX_BODY_CHARS:
+        raise ValueError(f"description is {len(description)} characters; "
+                         f"the limit is {MAX_BODY_CHARS}")
+    ns = _namespace(ctx, namespace, "namespace") if namespace else None
+    reasons = []
+    if ns:
+        full = f"{ns['full_path']}/{slug}"
+        if _exists(ctx, f"/projects/{quote(full, safe='')}"):
+            reasons.append(f"project '{full}' already exists")
+    else:
+        full = f"<your personal namespace>/{slug}"
+    return _preview(
+        "create_project",
+        f"Create project '{full}' ({vis}) named {name.strip()!r}"
+        f"{' with a README' if initialize_with_readme else ' (empty)'}.",
+        ok=not reasons, danger=vis == "public", reasons=reasons,
+        warnings=_visibility_warnings(vis), name=name.strip(), path=slug,
+        full_path=full, namespace=ns["full_path"] if ns else None,
+        namespace_id=ns["id"] if ns else None, visibility=vis,
+        description=description or "",
+        initialize_with_readme=bool(initialize_with_readme),
+        endpoint="POST /projects")
+
+
+def do_create_project(ctx: Any, name: str, namespace: str | None = None,
+                      path: str | None = None, visibility: str = "private",
+                      description: str = "",
+                      initialize_with_readme: bool = False,
+                      namespace_id: int | None = None) -> dict:
+    """Create a project in ``namespace`` (default: the token user's own).
+
+    ``namespace_id`` is pinned from the preview (see :func:`do_create_group`).
+    """
+    slug = _resolve_path(name, path)
+    vis = _require_visibility(visibility)
+    body: dict[str, Any] = {"name": name.strip(), "path": slug,
+                            "visibility": vis,
+                            "initialize_with_readme": bool(initialize_with_readme)}
+    if description:
+        body["description"] = description
+    if namespace:
+        body["namespace_id"] = (namespace_id
+                                or _namespace(ctx, namespace, "namespace")["id"])
+    res = ctx.post("/projects", body) or {}
+    return {"action": "create_project", "ok": True, "id": res.get("id"),
+            "full_path": res.get("path_with_namespace", slug),
+            "visibility": res.get("visibility", vis),
+            "web_url": res.get("web_url"),
+            "http_url_to_repo": res.get("http_url_to_repo"),
+            "ssh_url_to_repo": res.get("ssh_url_to_repo")}
