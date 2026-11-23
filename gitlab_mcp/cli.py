@@ -36,7 +36,9 @@ import contextlib
 import json
 import os
 import re
+import stat
 import sys
+import traceback
 import unicodedata
 from importlib import import_module
 from typing import Any, Callable, Iterable, Sequence
@@ -186,6 +188,10 @@ def _module(name: str) -> Any:
 
 def _reporting() -> Any:
     return _module("reporting")
+
+
+def _migration() -> Any:
+    return _module("migration")
 
 
 def _actions() -> Any:
@@ -756,6 +762,123 @@ def run_read(command: str, args: argparse.Namespace) -> int:
     return 0
 
 
+#: ``--out`` for migration promises an owner-only file. Windows ACLs are not
+#: modelled here, so native Windows and Windows-backed mounts fail closed.
+_NATIVE_WINDOWS = os.name == "nt"
+_PRIVATE_FS = frozenset({"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs",
+                         "f2fs", "tmpfs", "overlay"})
+
+
+def _filesystem_type(fd: int) -> str | None:
+    """Linux filesystem type holding ``fd``; ``None`` when unknowable."""
+    try:
+        path = os.readlink(f"/proc/self/fd/{fd}")
+        with open("/proc/self/mounts", encoding="utf-8") as mounts:
+            rows = [line.split()[1:3] for line in mounts]
+    except OSError:
+        return None
+    best, kind = "", None
+    for mount, fstype in rows:
+        mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), mount)
+        prefix = mount.rstrip("/") + "/"
+        if (path == mount or path.startswith(prefix)) and len(mount) >= len(best):
+            best, kind = mount, fstype
+    return kind
+
+
+def _remove_if_new_empty(path: str, created: os.stat_result) -> None:
+    """Unlink ``path`` only if it is still the empty file this process made."""
+    with contextlib.suppress(OSError):
+        now = os.lstat(path)
+        if (stat.S_ISREG(now.st_mode) and now.st_size == 0
+                and (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino)):
+            os.unlink(path)
+
+
+def _write_private_report(path: str, text: str) -> None:
+    """Create ``path`` exclusively, prove it is private, then write ``text``.
+
+    The parent directory must be trusted: symlinks in parent components are
+    followed. Nothing is written unless the open file is owner-only on a
+    filesystem whose mode bits are the real access control.
+    """
+    if _NATIVE_WINDOWS:
+        raise ValueError("--out is not supported for migration on native Windows; "
+                         "use stdout or a Linux filesystem")
+    try:
+        # O_EXCL rejects existing files and symlinks, including dangling ones.
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise ValueError(f"--out already exists: {path}") from exc
+    created = None
+    try:
+        created = os.fstat(fd)
+        fstype = _filesystem_type(fd)
+        if (stat.S_IMODE(created.st_mode) != 0o600
+                or created.st_uid != os.geteuid() or fstype not in _PRIVATE_FS):
+            raise ValueError(f"--out cannot be made private here "
+                             f"(mode {stat.S_IMODE(created.st_mode):o}, "
+                             f"filesystem {fstype or 'unknown'}); use a private Linux filesystem")
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        if created is not None:
+            _remove_if_new_empty(path, created)
+        raise
+    try:
+        with handle:
+            handle.write(text if text.endswith("\n") else text + "\n")
+    except BaseException:
+        _remove_if_new_empty(path, created)
+        raise
+
+
+def run_migration(args: argparse.Namespace) -> int:
+    """Compare two instances without writing to either GitLab server."""
+    if args.instance is not None:
+        raise ValueError("migration takes --source-instance/--target-instance, not --instance")
+    source = make_context(args.source_instance)
+    target = make_context(args.target_instance)
+    result = scrub_data(_migration().audit(source, target, args.source_group,
+                                           args.target_group or args.source_group))
+    fmt = _resolve_format(args)
+    if fmt == "json":
+        text = render(result, fmt)
+    else:
+        renderer = render_markdown if fmt == "md" else render_table
+        chunks = []
+        for name in ("repositories", "access"):
+            rows = [dict(row, differences="; ".join(row["differences"]))
+                    if name == "repositories" else row
+                    for row in result[name]]
+            columns, _ = _tabular(rows)
+            if not columns:
+                columns = (["source_path", "target_path", "status", "differences"]
+                           if name == "repositories" else
+                           ["project", "username", "source_role", "target_role", "status"])
+            chunks.append(renderer(columns, rows, name))
+        summary = result["summary"]
+        summary_rows = _scalar_rows(summary)
+        for name in ("repositories", "access"):
+            for status, count in summary.get(name, {}).items():
+                summary_rows.append({"field": f"{name}.{status}", "value": count})
+        chunks.append(renderer(["field", "value"], summary_rows, "summary"))
+        chunks.append("limitations" + ("\n" + "\n".join(
+            f"- {terminal_safe_line(item)}" for item in result["limitations"])
+            if result["limitations"] else "\n- none"))
+        text = "\n\n".join(chunks)
+    if args.out:
+        _write_private_report(args.out, text)
+        print(f"wrote {terminal_safe(redact(args.out, error=False))}")
+    else:
+        print(terminal_safe(redact(text, error=False)))
+    if not result["complete"]:
+        return 2
+    return int(any(row["status"] != "identical" for name in ("repositories", "access")
+                   for row in result[name]))
+
+
 # ─── Parser ───────────────────────────────────────────────────────────────────
 
 _EPILOG = f"""examples:
@@ -911,6 +1034,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("local-status", "state of the local clones under the managed dir")
     p.add_argument("--group", default=None)
 
+    p = add("migration", "read-only repository and access comparison; "
+            "exit 0 identical, 1 differences, 2 indeterminate/error")
+    p.add_argument("--source-instance", required=True, metavar="NAME")
+    p.add_argument("--target-instance", required=True, metavar="NAME")
+    p.add_argument("--source-group", required=True, metavar="PATH")
+    p.add_argument("--target-group", default=None, metavar="PATH",
+                   help="default: source group")
+    p.epilog = ("--out FILE creates a new owner-only (0600) file and refuses "
+                "existing paths. Its parent directory must be trusted (not "
+                "writable by others); it is refused on native Windows and on "
+                "Windows-backed or non-private filesystems such as WSL /mnt/c. "
+                "Stdout works everywhere.")
+
     # ── writes ───────────────────────────────────────────────────────────────
     p = add("sync", "[write] fetch + fast-forward the local clones")
     p.add_argument("--group", default=None)
@@ -1021,6 +1157,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command in WRITE_SPECS:
             return run_write(args.command, args)
+        if args.command == "migration":
+            return run_migration(args)
         return run_read(args.command, args)
     except KeyboardInterrupt:
         print("\ncancelled", file=sys.stderr)
@@ -1029,9 +1167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         message = terminal_safe(redact(str(exc) or exc.__class__.__name__))
         print(paint(f"error: {message}", RED, sys.stderr), file=sys.stderr)
         if os.environ.get("GITLAB_MCP_DEBUG"):
-            import traceback
-            traceback.print_exc()
-        return 1
+            # The whole chain (messages, paths, causes) gets the same scrub.
+            print(terminal_safe(redact(traceback.format_exc())),
+                  end="", file=sys.stderr)
+        return 2 if args.command == "migration" else 1
 
 
 if __name__ == "__main__":                   # python -m gitlab_mcp.cli

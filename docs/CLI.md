@@ -124,6 +124,12 @@ error line.
 | `file PROJECT PATH [--ref R] [--max-chars 100000]` | One file from the repository. |
 | `local-status [--group G]` | Local clones: path, branch, dirty state and ahead/behind. Nothing is fetched. `G` must lie inside the managed directory, and the git hardening described in [MCP.md](MCP.md#local-clones-confinement-and-git-hardening) applies. |
 
+### Migration comparison
+
+`gitlab-cli report migration --source-instance SRC --target-instance DST --source-group PATH [--target-group PATH]` compares descendant repositories and effective access. Target group defaults to source group; `--instance` is not accepted. Read-only: no repositories or grants are copied. Table and Markdown output contain `repositories` and `access` tables, a compact `summary`, and `limitations`; `--json` keeps the full result. `--out FILE` creates an owner-only 0600 file only on a supported private Linux filesystem (for example ext4); existing final paths and symlinks are refused. Native Windows, WSL DrvFs (`/mnt/c`, `/mnt/d`, etc.), and other unverified or nonprivate filesystems fail closed; use stdout there. Supply a trusted parent directory not writable by others: parent symlinks are followed, not independently validated.
+
+Exit `0` means complete and identical, `1` means complete with different/missing/extra rows, and `2` means incomplete/indeterminate or an operational error. It compares branch and tag names plus project metadata, not commit contents; it does not prove LFS, wiki, issues/MRs, CI variables, registry, hooks, runners, verified identities, or that the source is safe to delete. Read the emitted `limitations`.
+
 `PROJECT` is a `group/subgroup/project` path or a numeric project id.
 
 `person` accepts names either way. Both lists are merged and de-duplicated,

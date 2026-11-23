@@ -104,7 +104,7 @@ def _request(url: str, headers: dict, params: dict = None, timeout: int = 12):
     """(response, '') on an HTTP answer, (None, reason) on a transport failure."""
     try:
         return requests.get(url, headers=headers, params=params,
-                            timeout=timeout), ""
+                            timeout=timeout, allow_redirects=False), ""
     except Exception as exc:                # noqa: BLE001 - reason is returned
         return None, _describe_exc(exc, (headers or {}).get("PRIVATE-TOKEN", ""))
 
@@ -207,7 +207,7 @@ def probe(url: str, token: str) -> dict:
         A 403/404 here is a real answer ("not allowed"), not a failure."""
         if resp is None:
             info["warnings"].append(f"{label}: {_creds.catalog_line(why)}")
-        elif resp.status_code >= 500:
+        elif 300 <= resp.status_code < 400 or resp.status_code >= 500:
             info["warnings"].append(
                 f"{label}: {_creds.catalog_line(f'HTTP {resp.status_code}')}")
 

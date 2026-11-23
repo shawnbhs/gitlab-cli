@@ -238,7 +238,7 @@ def _fetch_one(cfg: dict, path: str) -> tuple:
     try:
         res = requests.get(
             f"{cfg['url']}/api/v4/{path}",
-            headers=cfg["headers"], timeout=15
+            headers=cfg["headers"], timeout=15, allow_redirects=False
         )
     except requests.RequestException as exc:
         return None, _failure_line(0, f"{type(exc).__name__}: {exc}", path)
@@ -1272,11 +1272,12 @@ def _set_group_member(cfg: dict, gid: int, user_id: int,
         # Try add first
         res = requests.post(url, headers=cfg["headers"],
                             json={"user_id": user_id, "access_level": access_level},
-                            timeout=15)
+                            timeout=15, allow_redirects=False)
         if res.status_code == 409:
             # Already member → update
             res = requests.put(f"{url}/{user_id}", headers=cfg["headers"],
-                               json={"access_level": access_level}, timeout=15)
+                               json={"access_level": access_level}, timeout=15,
+                               allow_redirects=False)
     except requests.RequestException as e:
         _report_write_failure(context, path, exc=e)
         return
@@ -1299,7 +1300,8 @@ def _revoke_group_member(cfg: dict, gid: int, user_id: int, name: str, gpath: st
     context = f"members:revoke:{gpath}:user_{user_id}"
     try:
         res = requests.delete(f"{cfg['url']}/api/v4/{path}",
-                              headers=cfg["headers"], timeout=15)
+                              headers=cfg["headers"], timeout=15,
+                              allow_redirects=False)
     except requests.RequestException as e:
         _report_write_failure(context, path, exc=e)
         return
@@ -1418,7 +1420,7 @@ def cmd_edit_account(cfg: dict, user: dict):
     context = f"edit_account:user_{user_id}"
     try:
         res = requests.put(f"{cfg['url']}/api/v4/{path}", headers=cfg["headers"],
-                           json=payload, timeout=15)
+                           json=payload, timeout=15, allow_redirects=False)
     except requests.RequestException as e:
         _report_write_failure(context, path, exc=e)
         return
@@ -1505,7 +1507,7 @@ def cmd_user_actions(cfg: dict, user: dict):
         context = f"user_actions:delete:user_{user_id}"
         try:
             res = requests.delete(url_base, headers=cfg["headers"],
-                                  params=params, timeout=30)
+                                  params=params, timeout=30, allow_redirects=False)
         except requests.RequestException as e:
             _report_write_failure(context, url_base, exc=e)
             return
@@ -1533,7 +1535,8 @@ def cmd_user_actions(cfg: dict, user: dict):
 
     context = f"user_actions:{actions_map[action][0]}:user_{user_id}"
     try:
-        res = requests.request(method, url, headers=cfg["headers"], timeout=15)
+        res = requests.request(method, url, headers=cfg["headers"], timeout=15,
+                               allow_redirects=False)
     except requests.RequestException as e:
         _report_write_failure(context, url, exc=e)
         return

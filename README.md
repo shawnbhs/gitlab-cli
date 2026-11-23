@@ -1,23 +1,28 @@
 # GitLab CLI
 
-**v1.2.0** · [Changelog](CHANGELOG.md) · [License](LICENSE.md)
+**v1.3.0** · [Changelog](CHANGELOG.md) · [License](LICENSE.md)
 
 A command-line tool for working with several GitLab instances at once:
 clone whole group trees, sync hundreds of repositories intelligently,
 review team activity, and audit your remotes.
 
-It is built for every access level, from Guest to Admin. Anything your
-token cannot do is either hidden or greyed out with the reason shown.
-It never crashes on a permission it does not have.
+The interactive menu adapts to the token's access level, from Guest to
+Admin. API failures are reported rather than silently treated as empty
+inventories; a denied operation still needs to be handled by the caller.
 
 ---
 
 ## Install
 
-Requires Python 3.10 or newer, and git.
+Requires Python 3.10 or newer and git. Linux (including WSL Ubuntu on its
+Linux filesystem) is the documented install path. macOS and native Windows
+have not been verified as full installs; do not assume the Unix shell alias,
+POSIX permissions, or filesystem operations behave identically there.
+Migration audit stdout does not use the private-file writer; its `--out`
+restriction is described below.
 
 ```bash
-git clone <this-repo> gitlab-cli
+git clone <public-repository-URL> gitlab-cli
 cd gitlab-cli
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
@@ -29,12 +34,15 @@ The first run opens a setup wizard that asks for everything it needs.
 Optional, for convenience:
 
 ```bash
-./install.sh          # puts a `gitlab-cli` command on your PATH
+./install.sh          # creates a shell alias named `gitlab-cli`
 ```
 
-`install.sh` writes a shell alias that calls this checkout by absolute
+`install.sh` creates/reuses the venv, installs `requirements.txt`, and
+adds or refreshes a shell alias in `~/.zshrc`, `~/.bashrc`, or `~/.profile`.
+Reload that file before using the alias. It calls this checkout by absolute
 path: `gitlab-cli` = `<install-dir>/venv/bin/python <install-dir>/gitlab_cli.py`.
-That matters — see *Where your repositories go* below.
+This is not a standalone executable available to non-shell programs. For
+automation use those absolute paths. See *Where your repositories go* below.
 
 ---
 
@@ -75,7 +83,8 @@ Any other MCP client takes the same two parts: `command` is
 
 The same reports and previewed writes are available by hand:
 `gitlab-cli report <command>` (see [docs/CLI.md](docs/CLI.md); run
-`gitlab-cli report --help` for the list).
+`gitlab-cli report --help` for the list). The MCP confirmation-token
+protocol is separate from the shell's `Proceed? [y/N]` confirmation.
 
 ---
 
@@ -107,26 +116,34 @@ write actions.
 > **Important:** use a Personal Access Token, **not** a project or group
 > bot token. A bot token returns 401 and cannot see your groups.
 
-Tokens are stored in `~/.gitlab-cli/env` with mode 600 — **not** in
-`instances.json`, so they can never end up in a commit.
+The wizard stores tokens in `~/.gitlab-cli/env` with mode 0600, not
+in `instances.json`. That separation does not prevent someone from manually
+committing a token; inspect your staged diff before publishing. A disclosed
+token needs rotation on the GitLab server, not merely a permission change.
 
 To manage them yourself, set an environment variable instead:
 
 ```bash
-export GITLAB_TOKEN_WORK=glpat-xxxx       # for the instance named "Work"
-export GITLAB_TOKEN=glpat-xxxx            # fallback for all instances
+# Set these in your own protected shell environment; never paste a real token in docs.
+export GITLAB_TOKEN_WORK='<token-for-Work>'
+export GITLAB_TOKEN='<token-for-active-instance>'
 ```
 
-An environment variable always wins over the file.
+For a named instance, `GITLAB_TOKEN_<NAME>` (uppercase slug, for example
+`WORK`) takes precedence, then that instance's `token_env` variable. The
+generic `GITLAB_TOKEN` applies only to the active instance; legacy inline
+tokens may be migrated out of `instances.json`. Keep real credentials out of
+commands, transcripts, issue reports, and this public repository.
 
 ### The token is never written into a repository
 
-A clone needs the token, but it is not left behind in the clone. Before
-cloning, the token is handed to git's credential helper
-(`~/.git-credentials`, mode 600); the remote URL written into
-`.git/config` is the clean, credential-free URL, and `.git/config` is
-chmod'ed to 600 as a second line of defence. `git pull` inside the clone
-keeps working because the credential helper supplies the token.
+A clone needs the token, but the tool does not put it in the clone's
+remote URL. The token is handed to git's credential store
+(`~/.git-credentials`, mode 0600): this is **plaintext at rest**, so
+protect that file and account. The remote URL in `.git/config` is
+credential-free; the tool also tightens that file to mode 0600. `git pull`
+inside the clone uses the credential helper. A disclosed token still needs
+server-side rotation; deleting a local copy does not revoke it.
 
 If your clones predate this behaviour they may still carry
 `http://oauth2:<token>@host/...` in `.git/config`. `gitlab-cli remotes`
@@ -204,6 +221,7 @@ gitlab-cli remotes [dir] [--fix]    # audit remotes (active instance only)
 gitlab-cli harden-perms [--dry-run] [root ...]
 gitlab-cli report create-group   NAME [--path] [--parent] [--visibility]
 gitlab-cli report create-project NAME [--namespace] [--path] [--visibility] [--description] [--readme]
+gitlab-cli report migration --source-instance SRC --target-instance DST --source-group PATH [--target-group PATH]
 gitlab-cli --help                   # this list
 ```
 
@@ -217,6 +235,69 @@ day to day; it is what you attach to a bug report.
 Retrying failed projects and browsing the error log are available from
 the interactive menu (a group with leftover errors is marked `⚠` and
 offers a **Retry** action; the main menu has an **Error Log** section).
+
+### Migration audit
+
+Run only against configured instance *names* and full group paths:
+
+```bash
+gitlab-cli report migration --source-instance Source --target-instance Target \
+  --source-group example/team --target-group example/new-team --format table
+gitlab-cli report migration --source-instance Source --target-instance Target \
+  --source-group example/team --json
+```
+
+`--target-group` defaults to `--source-group`. The shared report flags
+`--format {table,md,json}` and `--json` control output. The parser also
+accepts `--since`, `--until`, and `--yes`, but migration does not use a
+time window or request write confirmation. Do **not** pass `--instance`;
+use `--source-instance` and `--target-instance`. Run
+`gitlab-cli report migration --help` for current options.
+
+This is a **read-only GET inventory comparison**, not a migration: it
+creates no repositories or grants and changes no remote GitLab state. It
+walks the source and target group descendants, owned projects (including
+subgroups, excluding projects only shared into the group), branch and tag
+refs, project metadata, direct group/project members, effective project
+members, ancestors of a nested group, and invited group grants. Strict
+pagination and required metadata checks fail rather than treating a
+partial collection as empty. Invited groups inaccessible to the token
+leave grant provenance indeterminate; expansion beyond 50 distinct
+invited groups per side aborts the audit.
+
+Rows use relative repository paths. Repository comparison checks default
+branch, archived/empty state, visibility, and branch/tag names **and their
+reported commit IDs** (plus tag target and message); it does not inspect
+commit contents or object reachability. Access rows compare usernames,
+effective role, state, expiry, and inferred grant origin (`direct`,
+`inherited`, `shared`, combinations, or `indeterminate`). Matching
+usernames across instances are only candidate identities. A direct grant
+may coexist with a higher inherited or shared grant, so its presence
+alone cannot establish why the effective role exists. Public/internal
+visibility, admins, hidden groups, custom roles, and token scope can
+grant other access not proved absent by this comparison. Missing/extra
+rows describe observed inventory, not independently verified admin
+completeness.
+
+Table/Markdown output includes `repositories`, `access`, compact
+`summary`, and `limitations`; `--json` preserves the structured result.
+Treat output as sensitive: it contains project paths, usernames, roles,
+and membership state. `--out FILE` creates a **new** owner-only (0600)
+file on a supported private Linux filesystem (for example ext4), refusing
+existing files and symlinks. It fails closed on native Windows, WSL
+DrvFs (`/mnt/c`, `/mnt/d`, etc.), and unverified or nonprivate
+filesystems. Stdout remains available; shell redirection is **not**
+equivalent to the protected `--out` writer. Choose a trusted parent
+directory not writable by others; parent symlinks are followed and not
+independently validated.
+
+Migration-specific exit codes (including `--json` output): `0` means
+complete and identical; `1` means complete with different, missing, or
+extra rows; `2` means incomplete/indeterminate or operational error.
+A status `0` is **not** proof that the source is safe to delete. The
+comparison does not establish LFS objects, wiki, issues/MRs, CI
+variables, registry, hooks, runners, verified identities, or migration
+readiness. Read emitted `limitations` before acting.
 
 ### Creating groups and projects
 
@@ -465,7 +546,8 @@ exclusion.
 > owns no personal project.
 
 Discovery is read-only: enabling the setting makes the tool *list and
-disclose* these projects. It does not by itself clone them.
+disclose* these projects. It does not by itself clone them. The
+group-based Clone All command still does not clone personal namespaces.
 
 ### Tightening permissions on clones that already exist
 
@@ -753,8 +835,9 @@ tests/           regression suite — see tests/README.md
 ./venv/bin/python tests/run_tests.py
 ```
 
-About 1,950 checks across 68 test files (run it for the exact figure — it
-moves as tests are added). The suite pins the behaviour described
+The count changes as tests are added; the last
+`RUN=... FAIL=... ERROR=... SKIP=...` line is the result (see
+[tests/README.md](tests/README.md)). The suite pins the behaviour described
 above: destination anchoring, strict pagination, coverage-based group
 status, `ca` including partial groups, resume validity, URL
 normalisation, credential hygiene and redaction, error-log concurrency
@@ -765,8 +848,9 @@ confirmation and read-only gates. It uses real
 repositories in a temp directory; git is never mocked and your real
 clone tree is never written to.
 
-Opt-in live tests, which need a reachable GitLab and a configured
-instance and skip cleanly without one:
+Opt-in live tests require a reachable GitLab and configured instance;
+otherwise they skip. The offline suite does **not** prove a live GitLab
+migration comparison or clone. A skipped live test is not a pass:
 
 ```bash
 GITLAB_CLI_LIVE_TESTS=1 ./venv/bin/python tests/run_tests.py
@@ -818,6 +902,17 @@ Usually the VPN. Ping the host and check `doctor`.
 Every git command has a 120-second timeout and runs with
 `GIT_TERMINAL_PROMPT=0`, so an indefinite hang should not happen. If it
 does, run `doctor`.
+
+---
+
+## Not a full migration or backup
+
+The migration audit is comparison only. No command here transfers GitLab
+issues, merge requests, wikis, CI variables, container registry, hooks,
+runners, LFS objects, or verified user identities between instances.
+Clone/sync handles local git repositories, not those GitLab features.
+Neither a clean mirror report nor a migration exit `0` authorizes deletion
+of the source. Review ownership and the missing surfaces separately.
 
 ---
 

@@ -16,6 +16,7 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from _bootstrap import TempTreeTestCase  # noqa: F401  (path bootstrap)
 
@@ -194,17 +195,14 @@ class ScreenVisibilityTests(MembersFetchTestCase):
 
     def test_members_list_screen_shouts_when_the_list_is_short(self):
         # 3 members shown out of an unknown real total -> must be visible.
-        members._can_list_all_users = lambda cfg: True
         self.install([_Resp(200, _users(0, 100), next_page="2"),
                       _Resp(500), _Resp(500), _Resp(500),   # active, truncated
                       _Resp(200, [], next_page=""),          # blocked
                       _Resp(200, [], next_page="")])         # fallback groups
         buf = io.StringIO()
-        try:
-            with redirect_stdout(buf):
-                members.cmd_members_list(CFG)
-        except (EOFError, OSError):
-            pass
+        with patch.object(members, "_can_list_all_users", return_value=True), \
+                patch("builtins.input", return_value="q"), redirect_stdout(buf):
+            members.cmd_members_list(CFG)
         text = buf.getvalue()
         self.assertIn("INCOMPLETE", text,
                       "the Members screen printed a count with no warning that "

@@ -317,7 +317,7 @@ class GitLabContext:
         self.master_dir: str = gl_paths.anchor(cfg.get("master_dir") or ".")
         self.__cfg_public["master_dir"] = self.master_dir
 
-        self.__session = requests.Session()
+        self.__session = _NoRedirectSession()
         self.__session.headers.update({
             "PRIVATE-TOKEN": self.__token,
             "Accept": "application/json",
@@ -415,13 +415,17 @@ class GitLabContext:
         """One HTTP call. Transport failures become ``GitLabTransportError``."""
         url = self._api_url(path)
         try:
-            return self.__session.request(
+            res = self.__session.request(
                 method, url, params=params, json=json,
                 timeout=TIMEOUT, verify=VERIFY_TLS)
         except requests.RequestException as exc:
             raise GitLabTransportError(
                 f"{method} failed: {type(exc).__name__}: {exc}",
                 status=None, url=path, secrets=(self.__token,)) from None
+        # A redirect could carry PRIVATE-TOKEN to its Location; never follow.
+        if 300 <= res.status_code < 400:
+            raise self._error_for(res, path)
+        return res
 
     def _parse(self, res: requests.Response, path: str) -> Any:
         """Parsed JSON body, or ``None`` for an empty/204 response.
@@ -602,6 +606,19 @@ class GitLabContext:
 
 
 # ─── Small helpers ────────────────────────────────────────────────────────────
+
+class _NoRedirectSession(requests.Session):
+    """A session that never follows a redirect.
+
+    Requests strips ``Authorization`` on a cross-host redirect but not
+    ``PRIVATE-TOKEN``, so following any ``Location`` could hand the token to
+    whatever host the response names. The 3xx comes back to the caller instead.
+    """
+
+    def request(self, *args: Any, **kwargs: Any) -> requests.Response:
+        kwargs["allow_redirects"] = False
+        return super().request(*args, **kwargs)
+
 
 def _int_header(res: requests.Response, name: str) -> int | None:
     """An integer response header, or ``None`` when absent/not a number."""

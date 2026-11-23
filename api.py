@@ -365,7 +365,14 @@ def request(url: str, headers: dict, params: dict = None,
             record_failure(status, message, url, quiet=quiet)
 
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+        # Never follow a redirect: requests strips Authorization on a
+        # cross-host hop but not PRIVATE-TOKEN. A 3xx is returned and recorded.
+        # ponytail: test stubs whose get() takes no **kwargs skip the flag;
+        # the real requests.get always takes it.
+        no_follow = ({"allow_redirects": False}
+                     if _accepts_kwarg(requests.get, "allow_redirects") else {})
+        res = requests.get(url, headers=headers, params=params, timeout=TIMEOUT,
+                           **no_follow)
     except requests.Timeout:
         _fail(0, _explain(0, url, "timeout"))
         return None
@@ -378,7 +385,7 @@ def request(url: str, headers: dict, params: dict = None,
         _fail(0, _explain(0, url, "dns" if dns else "connection_refused"))
         return None
 
-    if res.status_code >= 400:
+    if res.status_code >= 300:
         _fail(res.status_code, _explain(res.status_code, url))
     return res
 
@@ -392,13 +399,13 @@ def _total_header(res) -> "int | None":
     return int(raw) if raw.isdigit() else None
 
 
-def _accepts_record(fn) -> bool:
-    """Whether a request() callable takes `record=` (stubs may not)."""
+def _accepts_kwarg(fn, name: str) -> bool:
+    """Whether a callable takes keyword `name` (stubs may not)."""
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
-    return "record" in params or any(
+    return name in params or any(
         q.kind is inspect.Parameter.VAR_KEYWORD for q in params.values())
 
 
@@ -442,7 +449,7 @@ def get_paginated(url: str, headers: dict, params: dict = None,
             final = attempt == _RETRIES
             if final:
                 res = request(url, headers, p, quiet=quiet)
-            elif _accepts_record(request):
+            elif _accepts_kwarg(request, "record"):
                 res = request(url, headers, p, quiet=True, record=False)
             else:
                 res = request(url, headers, p, quiet=True)
