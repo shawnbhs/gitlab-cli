@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Members → Manage → `4. Project Permissions`** grants, changes and
+  revokes direct project membership after confirmation. It never removes
+  inherited group access and offers Guest through Maintainer only.
+
+### Security
+
+- Project membership writes validate numeric IDs, refuse incomplete
+  listings, disable redirects and report failures through the existing
+  redacted write-failure path.
+
+---
+
 ## [1.3.0] - 2026-11-08
 
 Groups, subgroups and projects can now be created from the menu, the shell

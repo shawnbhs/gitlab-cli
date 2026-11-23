@@ -78,7 +78,7 @@ def _role_str(access_level: int) -> str:
 _FIX_403_MEMBERSHIPS = ("Only an administrator token can read another user's "
                         "memberships; ask a GitLab admin.")
 _FIX_403_MEMBERS = ("Needs an admin token, or Maintainer (or Owner) role on "
-                    "that group.")
+                    "that group or project.")
 _FIX_403_USERS = "This endpoint is admin-only; use an administrator's token."
 # The instance-wide user list and per-user account writes are admin-only.
 # Per-user READS such as /events are not, so they keep the catalog's fix.
@@ -930,6 +930,7 @@ def cmd_member_actions(cfg: dict, user: dict):
             while True:
                 print(f"\n{BOLD}  🔐 Manage — {name}{RESET}\n")
                 print(f"  {CYAN}1.{RESET}  Group Permissions  — add/revoke access")
+                print(f"  {CYAN}4.{RESET}  Project Permissions — direct membership")
                 if can_manage:
                     print(f"  {CYAN}2.{RESET}  Edit Account       — edit profile fields")
                     print(f"  {CYAN}3.{RESET}  User Actions       — block/ban/delete")
@@ -938,13 +939,15 @@ def cmd_member_actions(cfg: dict, user: dict):
                     print(f"  {DIM}3.  User Actions       — admin required{RESET}")
                 print(f"\n  {YELLOW}b{RESET}  back\n")
                 try:
-                    sub = menu_key(input(f"{BOLD}  Choice (1/2/3): {RESET}"))
+                    sub = menu_key(input(f"{BOLD}  Choice (1/2/3/4): {RESET}"))
                 except (KeyboardInterrupt, EOFError):
                     break
                 if sub == "b":
                     break
                 elif sub == "1":
                     cmd_group_permissions(cfg, user)
+                elif sub == "4":
+                    cmd_project_permissions(cfg, user)
                 elif sub in ("2", "3") and not can_manage:
                     print_warn("  This action requires admin access.")
                 elif sub == "2":
@@ -961,7 +964,7 @@ def cmd_member_actions(cfg: dict, user: dict):
                 else:
                     # Never silently fall through to "continue". An answer the
                     # program does not understand is refused out loud.
-                    print_unknown_choice(sub, ["1", "2", "3", "b"])
+                    print_unknown_choice(sub, ["1", "2", "3", "4", "b"])
 
         else:
             # Unrecognised key: say so instead of quietly redrawing the menu.
@@ -976,10 +979,130 @@ def cmd_member_actions(cfg: dict, user: dict):
             return
 
 
+def _positive_id(value) -> bool:
+    return type(value) is int and value > 0
+
+
+def cmd_project_permissions(cfg: dict, user: dict):
+    """Grant, change or revoke only direct project membership."""
+    user_id = user.get("id")
+    if not _positive_id(user_id):
+        print_error("Invalid user ID; refusing project membership change.")
+        return
+    name = user.get("name", "")
+    try:
+        projects = _get_paginated(cfg, "projects", {"membership": True},
+                                  quiet=True, strict=True)
+        valid_projects = []
+        for project in projects:
+            if not _positive_id(project.get("id")):
+                raise ValueError("invalid project ID in listing")
+            valid_projects.append(project)
+    except (ApiError, ValueError) as exc:
+        print_error("Project permissions cannot be shown: the listing did not complete or is invalid.")
+        print_error(_api_error_line(exc) if isinstance(exc, ApiError) else str(exc))
+        return
+    if not valid_projects:
+        print_warn("No projects visible to this token in its membership list.")
+        return
+    print_section(f"Project Permissions: {name}")
+    print_info("Direct project membership only; inherited group access is not changed here.")
+    for index, project in enumerate(valid_projects, 1):
+        print(f"  {index}. {project.get('path_with_namespace', project['id'])}")
+    try:
+        choice = menu_key(input("  Which project? (number, b = back): "))
+    except (KeyboardInterrupt, EOFError):
+        return
+    if choice == "b":
+        return
+    if not choice.isascii() or not choice.isdecimal() or not (1 <= int(choice) <= len(valid_projects)):
+        print_unknown_choice(choice, [str(i) for i in range(1, len(valid_projects) + 1)] + ["b"])
+        return
+    project = valid_projects[int(choice) - 1]
+    pid = project["id"]
+    path = project.get("path_with_namespace") or str(pid)
+    try:
+        direct = _get_paginated(cfg, f"projects/{pid}/members", quiet=True, strict=True)
+        member = next((m for m in direct if m.get("id") == user_id), None)
+    except ApiError as exc:
+        print_error("Direct project members cannot be shown: the listing did not complete.")
+        print_error(_api_error_line(exc))
+        return
+    print_info(f"{name} on {path}: " +
+               (f"direct {_role_str(member.get('access_level', 0))}" if member else
+                "no direct membership (inherited access may still exist)."))
+    print("  1. Change direct role" if member else "  1. Grant direct role")
+    if member:
+        print("  2. Revoke direct membership (inherited group access remains)")
+    try:
+        action = menu_key(input("  Choice (b = back): "))
+    except (KeyboardInterrupt, EOFError):
+        return
+    if action == "b":
+        return
+    if action == "1":
+        level = _pick_project_role()
+        if level is None:
+            return
+    elif action != "2" or not member:
+        print_unknown_choice(action, ["1", "2", "b"] if member else ["1", "b"])
+        return
+    verb = "revoke" if action == "2" else ("change" if member else "grant")
+    role = "" if action == "2" else f" as {ROLES[level][0]}"
+    try:
+        confirmation = menu_key(input(f"  Confirm {verb} direct membership for {name} on {path}{role}? (y/N): "))
+    except (KeyboardInterrupt, EOFError):
+        return
+    if confirmation != "y":
+        print_info("Cancelled; no change.")
+        return
+    endpoint = f"projects/{pid}/members" + (f"/{user_id}" if member else "")
+    url = f"{cfg['url']}/api/v4/{endpoint}"
+    context = f"members:project:{verb}:project_{pid}:user_{user_id}"
+    try:
+        if action == "2":
+            response = requests.delete(url, headers=cfg["headers"], timeout=15,
+                                       allow_redirects=False)
+            success = (204,)
+        elif member:
+            response = requests.put(url, headers=cfg["headers"],
+                                    json={"access_level": level}, timeout=15,
+                                    allow_redirects=False)
+            success = (200,)
+        else:
+            response = requests.post(url, headers=cfg["headers"],
+                                     json={"user_id": user_id, "access_level": level},
+                                     timeout=15, allow_redirects=False)
+            success = (201,)
+    except requests.RequestException as exc:
+        _report_write_failure(context, endpoint, exc=exc)
+        return
+    if response.status_code in success:
+        print_info(f"Direct project membership {verb} succeeded for {name} on {path}.")
+    else:
+        _report_write_failure(context, endpoint, res=response)
+
+
+def _pick_project_role() -> int | None:
+    # GitLab's Owner (50) is group-owned, not a direct project assignment.
+    print("  1. Guest  2. Reporter  3. Developer  4. Maintainer  b. Back")
+    try:
+        choice = menu_key(input("  Role: "))
+    except (KeyboardInterrupt, EOFError):
+        return None
+    roles = {"1": 10, "2": 20, "3": 30, "4": 40}
+    if choice == "b":
+        return None
+    if choice not in roles:
+        print_unknown_choice(choice, ["1", "2", "3", "4", "b"])
+        return None
+    return roles[choice]
+
+
 # ─── Manage Section ────────────────────────────────────────────────────────────
 
 def cmd_group_permissions(cfg: dict, user: dict):
-    """Add or revoke group/project access for a user."""
+    """Add or revoke group access for a user."""
     name    = user.get("name", "")
     user_id = user.get("id")
 

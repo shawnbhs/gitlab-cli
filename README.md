@@ -706,6 +706,14 @@ Without admin rights:
 - admin-only options are greyed out with the reason
 - no 403 ever surfaces as a crash
 
+Members → user → Manage → `4. Project Permissions` grants, changes or
+revokes **direct** project membership only. It lists the token's project
+memberships strictly, shows whether the user is a direct member, and asks
+for confirmation before every write. Roles offered are Guest, Reporter,
+Developer and Maintainer; Owner stays a group role. Revoking direct project
+membership never removes inherited group access — use Group Permissions
+for that.
+
 A failed API page is an **error**, not an empty result: a bad or expired
 token makes the tool say so, instead of quietly reporting that you have
 zero projects.
