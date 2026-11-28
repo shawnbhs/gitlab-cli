@@ -11,6 +11,7 @@ import os
 import re
 import stat
 import subprocess
+from urllib.parse import urlsplit
 
 import coverage
 import error_catalog
@@ -411,118 +412,72 @@ def _reachable(path: str, remote) -> tuple[bool, str]:
 
 # ─── Which instance does a clone belong to? ───────────────────────────────────
 #
-# W8-2. Two GitLab instances share ONE clone root (`MasterGroups`) and are
-# told apart by a per-instance `folder`:
-#
-#     Hub     (hub.example.com)  folder = "acme"  -> root/acme
-#     Globex  (git.example.net)     folder = ""      -> root
-#
-# They are asymmetric BY DESIGN: the instance with an empty folder has the
-# root itself as its subtree, so it structurally CONTAINS the other one. The
-# instance-wide Remotes screen resolves its dest through the usual door
-# (`gitlab_cli._resolve_dest` -> `paths.anchor(cfg["master_dir"])`, where
-# master_dir already carries the folder), which is correct for Hub and a
-# superset for globex: with globex active the walk returned every work
-# tree, most of them Hub's. Remotes is the screen that OFFERS TO REWRITE
-# remote URLs, so answering `y` there rewrote hundreds of repositories of an instance
-# the user had not selected.
-#
-# The per-group screen was fixed in an earlier wave by resolving through
-# `paths` with the instance folder (see gitlab_cli.py's action "3" branch).
-# The same signal is used here rather than a second convention: an instance's
-# folder, read from the same instances.json `paths.configured_folders()`
-# reads, is what marks a subtree as belonging to someone else.
-#
-# The rule is deliberately an EXCLUSION, not an inclusion:
-#
-#   * a non-empty folder of ANY OTHER instance marks `root/<folder>` as that
-#     instance's subtree; nothing under it is ever audited or scrubbed here.
-#   * an other instance whose folder is EMPTY is NOT turned into an exclusion
-#     -- its subtree is the root, and excluding the root would empty the walk
-#     for the instance that does have a folder. That is exactly the symmetry
-#     assumption that breaks one of the two instances.
-#   * anything else, including a path outside the managed root entirely
-#     (`gitlab-cli remotes ./here`), stays in scope. Out-of-tree destinations
-#     are the user's explicit choice and already carry their own warning.
-#
-# Never imports instances.py: that module builds a cfg, and building a cfg
-# resolves TOKENS. instances.json is read directly, exactly as paths.py does.
-
+# Read only layout metadata. Scope discovery never resolves instance tokens.
 _scope_cache: dict = {"key": None, "scope": None}
+_BLOCKED_SCOPE = {"name": "invalid instance configuration", "blocked": True}
 
 
-def _read_instances() -> dict:
+def _read_instances() -> dict | None:
     try:
         st = os.stat(paths.INSTANCES_FILE)
-        key = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return {}
-    if _scope_cache["key"] == key and _scope_cache["scope"] is not None:
-        return _scope_cache["scope"]
-    try:
+    except FileNotFoundError:
+        if not os.path.lexists(paths.INSTANCES_FILE):
+            return None
+        raise
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("Invalid instances file")
+    key = (paths.INSTANCES_FILE, st.st_dev, st.st_ino, st.st_ctime_ns, st.st_mtime_ns, st.st_size)
+    if _scope_cache["key"] != key:
         with open(paths.INSTANCES_FILE, encoding="utf-8") as fh:
-            data = json.load(fh) or {}
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    _scope_cache.update(key=key, scope=data)
-    return data
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid instances file")
+        _scope_cache.update(key=key, scope=data)
+    return _scope_cache["scope"]
 
 
 def active_scope() -> dict | None:
-    """Describe the active instance's subtree, or None when undeterminable.
+    """Canonical active root; invalid configuration explicitly blocks scope."""
+    from instances import _base_of
 
-    None means "no scoping information" and is treated everywhere below as
-    "do not filter" -- the legacy behaviour. A machine with no instances
-    configured, an unreadable config, or no active instance must stay exactly
-    as harmless as it is today.
-    """
-    data = _read_instances()
-    insts = data.get("instances") or []
-    active = (data.get("active") or "").strip()
-    if not isinstance(insts, list) or not active:
-        return None
+    try:
+        data = _read_instances()
+        if data is None:
+            return None  # Standalone legacy callers without configuration.
+        authorities, scopes = {}, {}
+        instances = data["instances"]
+        if not isinstance(instances, list):
+            return _BLOCKED_SCOPE
+        for inst in instances:
+            name = inst["name"]
+            if not isinstance(name, str) or not name.strip() or name in scopes:
+                return _BLOCKED_SCOPE
+            url = inst["url"]
+            authority = paths.gitlab_authority(url)
+            host = authority[1]
+            if authorities.setdefault(host, authority) != authority:
+                return _BLOCKED_SCOPE
+            for key in ("base_dir", "master_dir"):
+                value = inst.get(key)
+                if value is not None and (not isinstance(value, str) or (value and not value.strip())):
+                    return _BLOCKED_SCOPE
+            base = paths.anchor(_base_of(inst))
+            scopes[name] = {"name": name, "base": base,
+                            "root": paths.managed_root(base, url),
+                            "authority": authority}
+        active = data["active"]
+        scope = scopes[active]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return _BLOCKED_SCOPE
+    return {**scope, "others": [other for other in scopes.values()
+                                if other["root"] != scope["root"]]}
 
-    me = None
-    for inst in insts:
-        if isinstance(inst, dict) and (inst.get("name") or "").strip() == active:
-            me = inst
-            break
-    if me is None:
-        return None
 
-    folder = (me.get("folder") or "").strip()
-    root = paths.anchor(me.get("master_dir") or ".")
-
-    others = []
-    for inst in insts:
-        if not isinstance(inst, dict) or inst is me:
-            continue
-        f = (inst.get("folder") or "").strip()
-        if not f:
-            # Empty folder == the root itself. Never an exclusion; see above.
-            continue
-        f = os.path.basename(os.path.normpath(f))
-        if not f or f == folder:
-            continue
-        others.append({
-            "name": (inst.get("name") or "").strip() or f,
-            "folder": f,
-            "root": os.path.normpath(
-                os.path.join(paths.anchor(inst.get("master_dir") or "."), f)),
-        })
-
-    return {
-        "name": active,
-        "folder": folder,
-        # `base` is the shared clone root (master_dir WITHOUT the folder);
-        # `root` is this instance's subtree inside it. They are equal for the
-        # instance whose folder is empty -- that is the whole asymmetry.
-        "base": os.path.normpath(root),
-        "root": os.path.normpath(os.path.join(root, folder) if folder else root),
-        "others": others,
-    }
+def _verified_scope(scope: dict | None) -> dict | None:
+    current = active_scope()
+    if scope is not None and scope != current:
+        return _BLOCKED_SCOPE
+    return current
 
 
 def _is_under(parent: str, child: str) -> bool:
@@ -532,7 +487,7 @@ def _is_under(parent: str, child: str) -> bool:
         c = os.path.realpath(child)
     except OSError:
         return False
-    return c == p or c.startswith(p + os.sep)
+    return c == p or c.startswith(os.path.join(p, ""))
 
 
 # Bucket name for a clone that sits inside the shared managed root but in
@@ -541,27 +496,69 @@ def _is_under(parent: str, child: str) -> bool:
 UNASSIGNED = "(unassigned)"
 
 
+def _in_tree(root: str, path: str) -> bool:
+    absolute = os.path.abspath(path)
+    return absolute == root or absolute.startswith(os.path.join(root, "")) or _is_under(root, path)
+
+
+def _matches_remote(url: str, expected: tuple[str, str], authority: tuple) -> bool:
+    if paths.remote_identity(url) != expected:
+        return False
+    parsed = urlsplit(url) if "://" in url else None
+    if parsed is None or parsed.scheme == "ssh":
+        return True
+    host_port = parsed.netloc.rsplit("@", 1)[-1]
+    return paths.gitlab_authority(f"{parsed.scheme}://{host_port}") == authority
+
+
+def _managed_remote_urls(path: str, scope: dict) -> dict[str, str]:
+    """Raw fetch URLs proven to match this checkout; never render them."""
+    try:
+        namespace = paths.managed_namespace(scope["root"], path)
+    except ValueError:
+        return {}
+    # Canonical work trees need local metadata. Do not read or rewrite a
+    # different repository's config through linked or redirected metadata.
+    git_dir = os.path.join(path, ".git")
+    config = os.path.join(git_dir, "config")
+    if (not os.path.isdir(git_dir) or not os.path.isfile(config)
+            or os.path.islink(git_dir) or os.path.islink(config)
+            or os.path.lexists(os.path.join(git_dir, "commondir"))
+            or any(os.environ.get(key) for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"))):
+        return {}
+    authority = scope["authority"]
+    expected = (authority[1], namespace)
+    urls = {}
+    for name, config_remote in read_remote_config(path).items():
+        url = config_remote["url"]
+        if not G.is_safe_remote_name(name) or not _matches_remote(url, expected, authority):
+            continue
+        rc, out, _ = G._managed_read(path, "remote", "get-url", "--all", "--", name)
+        # Require exactly one URL, unchanged by Git's URL rewrite rules.
+        if rc == 0 and out == url + "\n":
+            urls[name] = url
+    return urls
+
+
 def owner_of(path: str, scope: dict | None = None) -> str:
-    """'' when the path is in scope, otherwise who it belongs to instead.
+    """Empty for an in-scope checkout, otherwise the exclusion label."""
+    return _owner_of(path, _verified_scope(scope))
 
-    Two independent rules, because neither alone is sufficient:
 
-      * EXCLUSION -- the path is under another instance's folder subtree.
-        This is what protects the folder-less instance (globex), whose own
-        subtree is the shared root and therefore contains Hub's.
-      * CONTAINMENT -- the path is inside the shared managed root but outside
-        this instance's subtree. This protects the instance that DOES have a
-        folder when a caller hands it a root-wide walk, and it also catches
-        directories belonging to no configured instance at all.
-
-    A path outside the managed root entirely is NOT foreign: that is an
-    explicit `gitlab-cli remotes /some/where`, which already prints its own
-    off-site warning and must keep working.
-    """
-    if scope is None:
-        scope = active_scope()
+def _owner_of(path: str, scope: dict | None) -> str:
     if not scope:
         return ""
+    if scope.get("blocked"):
+        return scope_label(scope)
+    if scope.get("authority"):
+        for other in scope["others"]:
+            if _in_tree(other["root"], path):
+                return other["name"]
+        if _in_tree(scope["root"], path):
+            return "" if _managed_remote_urls(path, scope) else UNASSIGNED
+        if any(_in_tree(entry["base"], path) for entry in (scope, *scope["others"])):
+            return UNASSIGNED
+        return ""  # Explicit off-site legacy audit only.
 
     for other in scope.get("others", ()):
         if _is_under(other["root"], path):
@@ -582,11 +579,13 @@ def split_by_instance(repos: list[str],
     Repositories owned by another configured instance are REPORTED, never
     silently folded into the audit and never handed to the scrub.
     """
-    if scope is None:
-        scope = active_scope()
+    return _split_by_instance(repos, _verified_scope(scope))
+
+
+def _split_by_instance(repos: list[str], scope: dict | None) -> tuple[list[str], dict]:
     keep, foreign = [], {}
     for path in repos:
-        who = owner_of(path, scope)
+        who = _owner_of(path, scope)
         if who:
             foreign[who] = foreign.get(who, 0) + 1
         else:
@@ -628,11 +627,13 @@ def confirm_scrub_message(rows: list, scope: dict | None = None) -> str:
     """
     if scope is None:
         scope = getattr(rows, "scope", None) or active_scope()
-    leaky = [r for r in rows if r.get("leaks")]
+    leaky = [r for r in rows if r.get("leaks") and not r.get("local_only")]
     foreign = getattr(rows, "foreign", None) or {}
     msg = (f"About to rewrite remote URLs in {len(leaky)} of "
            f"{len(rows)} repositories of instance "
            f"'{scope_label(scope)}'.")
+    if any(r.get("local_only") for r in rows):
+        msg += " Off-site repositories are audit-only."
     if foreign:
         total = sum(foreign.values())
         names = ", ".join(sorted(foreign))
@@ -664,10 +665,9 @@ def audit(repos: list[str], check_network: bool = False,
     list -- carrying `.scope` and `.foreign` so print_audit can name the
     instance and the count it actually covered.
     """
-    if scope is None:
-        scope = active_scope()
-    if enforce_scope:
-        repos, foreign = split_by_instance(repos, scope)
+    scope = _verified_scope(scope)
+    if enforce_scope or (scope and (scope.get("authority") or scope.get("blocked"))):
+        repos, foreign = _split_by_instance(repos, scope)
     else:
         foreign = {}
 
@@ -675,8 +675,21 @@ def audit(repos: list[str], check_network: bool = False,
     rows.scope = scope
     rows.foreign = foreign
     rows.dropped = sum(foreign.values())
+    managed = bool(scope and scope.get("authority"))
     for path in repos:
-        remotes = list_remotes(path)
+        local_only = managed and not _in_tree(scope["root"], path)
+        if managed and not local_only:
+            urls = {name: mask_url(url) for name, url in _managed_remote_urls(path, scope).items()}
+            remotes = []
+            if urls:
+                remotes = [remote for remote in list_remotes(path)
+                           if urls.get(remote["name"]) == remote["url"]]
+            if not remotes:
+                rows.foreign[UNASSIGNED] = rows.foreign.get(UNASSIGNED, 0) + 1
+                rows.dropped += 1
+                continue
+        else:
+            remotes = list_remotes(path)
         # W10. A remote this tool refuses to touch is still a remote the user
         # needs to know about — it is the single most interesting row on the
         # screen. It is reported by its SANITISED name and excluded from
@@ -690,6 +703,7 @@ def audit(repos: list[str], check_network: bool = False,
             "count": len(remotes),
             "leaks": leaks,
             "has_creds": bool(leaks),
+            "local_only": local_only,
             "refused": [{"name": r["display"], "why": r["unsafe"],
                          "code": r["unsafe_code"],
                          "line": explain_line(code=r["unsafe_code"])}
@@ -704,7 +718,7 @@ def audit(repos: list[str], check_network: bool = False,
                                  if r["pending_deletion"] and not r["unsafe"]],
             "unreachable": [],
         }
-        if check_network:
+        if check_network and not local_only:
             for r in remotes:
                 if r["unsafe"] or r["pending_deletion"]:
                     continue
@@ -783,9 +797,12 @@ def print_audit(rows: list[dict], show_all: bool = False):
             print(f"    {safe_text(r['name'], 60)}  {DIM}→ {shown}{RESET}")
         if len(leaky) > 20:
             print(f"    {DIM}… and {len(leaky) - 20} more{RESET}")
-        print(f"\n  {YELLOW}→ Run the 'Strip tokens from remotes' option{RESET}")
-        # Stated before any caller can ask for confirmation.
-        print(f"  {BOLD}{confirm_scrub_message(rows, scope)}{RESET}")
+        if any(not r.get("local_only") for r in leaky):
+            print(f"\n  {YELLOW}→ Run the 'Strip tokens from remotes' option{RESET}")
+            # Stated before any caller can ask for confirmation.
+            print(f"  {BOLD}{confirm_scrub_message(rows, scope)}{RESET}")
+        else:
+            print(f"  {YELLOW}Off-site repositories are audit-only.{RESET}")
 
     if refused:
         print(f"\n  {BOLD}{RED}Refused — NOT audited and NOT rewritten:{RESET}")
@@ -1054,10 +1071,9 @@ def scrub(repos: list[str], save_to_store: bool = True,
     audit to have filtered would rewrite the other instance's remotes the
     moment one caller forgot. This is the write path -- it filters itself.
     """
-    if scope is None:
-        scope = active_scope()
-    if enforce_scope:
-        repos, foreign = split_by_instance(repos, scope)
+    scope = _verified_scope(scope)
+    if enforce_scope or (scope and (scope.get("authority") or scope.get("blocked"))):
+        repos, foreign = _split_by_instance(repos, scope)
     else:
         foreign = {}
 
@@ -1070,11 +1086,21 @@ def scrub(repos: list[str], save_to_store: bool = True,
     saved_hosts = set()
 
     for path in repos:
+        urls = None
+        if scope and scope.get("authority"):
+            urls = _managed_remote_urls(path, scope)
+            if not urls:
+                skipped = stats["skipped_by_instance"]
+                skipped[UNASSIGNED] = skipped.get(UNASSIGNED, 0) + 1
+                stats["skipped_other_instance"] += 1
+                continue
         stats["scanned"] += 1
         touched = False
         # reveal=True: the real credential is needed to file it in the store.
         # Nothing from these rows reaches stats["details"] unmasked.
         for rm in list_remotes(path, reveal=True):
+            if urls is not None and urls.get(rm["name"]) != rm["url"]:
+                continue
             name = os.path.basename(path)
 
             # W10. The gate for the WRITE path. `remote set-url <name> <url>`
@@ -1130,12 +1156,27 @@ def scrub(repos: list[str], save_to_store: bool = True,
                 stats["details"].append(f"{name}/{rm['display']} → {clean}")
                 continue
 
+            if urls is not None and (
+                    _verified_scope(scope) != scope
+                    or _managed_remote_urls(path, scope).get(rm["name"]) != rm["url"]):
+                stats["failed"] += 1
+                stats["details"].append(f"{name}/{rm['display']}: remote scope changed")
+                continue
+
             # 1) Secure the token first
             host_key = clean.split("://")[-1].split("/")[0]
             if save_to_store and host_key not in saved_hosts:
                 if _credential_approve(clean, cred):
                     saved_hosts.add(host_key)
                     stats["saved"] += 1
+                # The credential helper may block while the instance or
+                # repository changes. Check again before writing Git config.
+                if urls is not None and (
+                        _verified_scope(scope) != scope
+                        or _managed_remote_urls(path, scope).get(rm["name"]) != rm["url"]):
+                    stats["failed"] += 1
+                    stats["details"].append(f"{name}/{rm['display']}: remote scope changed")
+                    continue
 
             # 2) Then strip it from the URL
             rc, _, err = G._run([G.GIT_BIN, "-C", path, "remote", "set-url",

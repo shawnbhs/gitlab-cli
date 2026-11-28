@@ -5,12 +5,8 @@
 # to REWRITE remote URLs, so with globex (folder="") active it audited and
 # offered to scrub Hub's clones under MasterGroups/acme.
 #
-# The two instances are asymmetric by design:
-#     Hub      folder = "acme"  -> root/acme
-#     globex folder = ""             -> root itself
-# A fix that assumes symmetry ("walk root/folder") silently empties the walk
-# for the instance without a folder. Every test below therefore exercises BOTH
-# instances plus the empty-folder edge case explicitly.
+# The instances share a base and one full project namespace, but not a host
+# root. Their old folder settings must not affect ownership or exclusion.
 #
 # All fixtures are real `git init` repositories in a temp dir, and the
 # instances.json used is a temp file — the user's live config is never read
@@ -19,6 +15,8 @@
 import json
 import os
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import _bootstrap  # noqa: F401  (sys.path + error-log guard)
 
@@ -41,15 +39,16 @@ class _ScopeCase(_bootstrap.TempTreeTestCase):
         super().setUp()
         self.root = self.dest          # <tmp>/MasterGroups, the shared root
 
-        # Hub's subtree (folder="acme") and globex's (folder="").
+        self.hub_root = os.path.join(self.root, "hub.example.com")
+        self.rob_root = os.path.join(self.root, "git.example.net")
         self.hub_repos = [
-            self.make_repo("acme/atlas/atlas"),
-            self.make_repo("acme/vertex/vertex-backend"),
+            self.make_repo("hub.example.com/shared/team/atlas", "https://hub.example.com/shared/team/atlas.git"),
+            self.make_repo("hub.example.com/acme/vertex/vertex-backend", "https://hub.example.com/acme/vertex/vertex-backend.git"),
         ]
         self.rob_repos = [
-            self.make_repo("initech/accounts-ms"),
-            self.make_repo("globex/meta-repo"),
-            self.make_repo("anna_user/investment-data"),
+            self.make_repo("git.example.net/shared/team/atlas", "http://git.example.net/shared/team/atlas.git"),
+            self.make_repo("git.example.net/globex/meta-repo", "http://git.example.net/globex/meta-repo.git"),
+            self.make_repo("git.example.net/anna_user/investment-data", "http://git.example.net/anna_user/investment-data.git"),
         ]
 
         self.instances = [
@@ -72,10 +71,6 @@ class _ScopeCase(_bootstrap.TempTreeTestCase):
         paths.INSTANCES_FILE = _write_instances(
             self.tmp, name, instances if instances is not None
             else self.instances)
-        # The caches key on (mtime_ns, size); two writes within one tick can
-        # collide, so they are cleared explicitly.
-        remotes._scope_cache.update(key=None, scope=None)
-        paths._folder_cache.update(key=None, folders=frozenset())
         return remotes.active_scope()
 
     def walk(self):
@@ -91,56 +86,33 @@ class TestActiveInstanceScoping(_ScopeCase):
     def test_root_walk_really_does_see_both_instances(self):
         """Guards the premise: without scoping the walk is cross-instance."""
         found = self.walk()
-        self.assertEqual(len(found), 5)
-        self.assertTrue(any("acme" in p.split(os.sep) for p in found))
+        self.assertCountEqual(found, self.hub_repos + self.rob_repos)
 
     def test_globex_active_excludes_every_hub_repo(self):
-        """THE BUG. Empty folder => subtree is the root, minus Hub's folder."""
+        """A blank legacy folder never widens the host scope."""
         scope = self.activate("globex")
         keep, foreign = remotes.split_by_instance(self.walk(), scope)
 
-        self.assertEqual(len(keep), len(self.rob_repos))
-        for p in keep:
-            self.assertNotIn("acme", p.split(os.sep),
-                             f"Hub clone leaked into globex's scope: {p}")
+        self.assertCountEqual(keep, self.rob_repos)
         self.assertEqual(foreign, {"Hub": len(self.hub_repos)})
 
     def test_hub_active_excludes_every_globex_only_repo(self):
         scope = self.activate("Hub")
-        # Hub's dest is already root/acme; nothing outside it is walked,
-        # and nothing inside it belongs to globex.
-        from pull import _find_git_repos
-        found = _find_git_repos(os.path.join(self.root, "acme"))
-        keep, foreign = remotes.split_by_instance(found, scope)
+        keep, foreign = remotes.split_by_instance(self.walk(), scope)
+        self.assertCountEqual(keep, self.hub_repos)
+        self.assertEqual(foreign, {"globex": len(self.rob_repos)})
 
-        self.assertEqual(len(keep), len(self.hub_repos))
-        for p in keep:
-            self.assertIn("acme", p.split(os.sep))
-        self.assertEqual(foreign, {},
-                         "an instance WITH a folder must exclude nothing")
-
-    def test_empty_folder_instance_is_never_turned_into_an_exclusion(self):
-        """The asymmetry trap.
-
-        globex's folder is "" so its subtree IS the root. If that were
-        treated as an exclusion, Hub's walk (a strict subset of the root)
-        would be emptied.
-        """
+    def test_blank_legacy_folder_still_excludes_its_canonical_host(self):
         scope = self.activate("Hub")
-        self.assertEqual(
-            [o["name"] for o in scope["others"]], [],
-            "the folder-less instance must not become an excluded subtree")
-
-        keep, _ = remotes.split_by_instance(self.hub_repos, scope)
-        self.assertEqual(len(keep), len(self.hub_repos),
-                         "symmetry assumption emptied the folder-ed instance")
+        self.assertEqual([(o["name"], o["root"]) for o in scope["others"]],
+                         [("globex", self.rob_root)])
+        keep, foreign = remotes.split_by_instance(self.hub_repos, scope)
+        self.assertCountEqual(keep, self.hub_repos)
+        self.assertEqual(foreign, {})
 
     def test_scope_root_of_each_instance(self):
-        self.assertEqual(self.activate("globex")["root"],
-                         os.path.normpath(self.root))
-        self.assertEqual(self.activate("Hub")["root"],
-                         os.path.normpath(os.path.join(self.root,
-                                                       "acme")))
+        self.assertEqual(self.activate("globex")["root"], self.rob_root)
+        self.assertEqual(self.activate("Hub")["root"], self.hub_root)
 
 
 # ─── audit() honours the scope ────────────────────────────────────────────────
@@ -151,9 +123,7 @@ class TestAuditScoped(_ScopeCase):
         self.activate("globex")
         rows = remotes.audit(self.walk())
 
-        self.assertEqual(len(rows), len(self.rob_repos))
-        for r in rows:
-            self.assertNotIn("acme", r["path"].split(os.sep))
+        self.assertCountEqual([r["path"] for r in rows], self.rob_repos)
         self.assertEqual(rows.scope["name"], "globex")
         self.assertEqual(rows.foreign, {"Hub": len(self.hub_repos)})
         self.assertEqual(rows.dropped, len(self.hub_repos))
@@ -162,10 +132,9 @@ class TestAuditScoped(_ScopeCase):
         self.activate("Hub")
         rows = remotes.audit(self.walk())
 
-        self.assertEqual(len(rows), len(self.hub_repos))
-        for r in rows:
-            self.assertIn("acme", r["path"].split(os.sep))
+        self.assertCountEqual([r["path"] for r in rows], self.hub_repos)
         self.assertEqual(rows.scope["name"], "Hub")
+        self.assertEqual(rows.foreign, {"globex": len(self.rob_repos)})
 
     def test_audit_result_is_still_a_plain_list_for_old_callers(self):
         self.activate("globex")
@@ -175,11 +144,11 @@ class TestAuditScoped(_ScopeCase):
         self.assertIn("path", rows[0])
         self.assertIn("has_creds", rows[0])
 
-    def test_enforce_scope_false_restores_the_whole_walk(self):
-        """The escape hatch stays explicit, never the default."""
+    def test_enforce_scope_false_cannot_widen_canonical_audit(self):
         self.activate("globex")
         rows = remotes.audit(self.walk(), enforce_scope=False)
-        self.assertEqual(len(rows), 5)
+        self.assertCountEqual([r["path"] for r in rows], self.rob_repos)
+        self.assertEqual(rows.foreign, {"Hub": len(self.hub_repos)})
 
     def test_no_config_means_no_filtering(self):
         """An unconfigured machine must behave exactly as before."""
@@ -187,12 +156,21 @@ class TestAuditScoped(_ScopeCase):
         remotes._scope_cache.update(key=None, scope=None)
         self.assertIsNone(remotes.active_scope())
         rows = remotes.audit(self.walk())
-        self.assertEqual(len(rows), 5)
+        self.assertCountEqual([r["path"] for r in rows], self.hub_repos + self.rob_repos)
 
-    def test_active_name_not_in_instances_means_no_filtering(self):
-        self.activate("ghost-instance")
-        self.assertIsNone(remotes.active_scope())
-        self.assertEqual(len(remotes.audit(self.walk())), 5)
+    def test_unknown_active_instance_blocks_even_explicit_unscoped_requests(self):
+        scope = self.activate("ghost-instance")
+        repos = self.walk()
+        self.assertTrue(scope["blocked"])
+        with patch.object(remotes, "list_remotes") as reader:
+            rows = remotes.audit(repos, enforce_scope=False)
+            stats = remotes.scrub(repos, save_to_store=False, enforce_scope=False)
+        reader.assert_not_called()
+        self.assertEqual(rows, [])
+        self.assertEqual(rows.dropped, len(repos))
+        self.assertEqual(stats["scanned"], 0)
+        self.assertEqual(stats["cleaned"], 0)
+        self.assertEqual(stats["skipped_by_instance"], {scope["name"]: len(repos)})
 
 
 # ─── scrub() filters independently of audit() ─────────────────────────────────
@@ -214,29 +192,39 @@ class TestScrubScoped(_ScopeCase):
         self.activate("globex")
         raw = self.walk()
         self.assertEqual(len(raw), 5)
-        stats = remotes.scrub(raw, save_to_store=False, dry_run=True)
+        # Synthetic userinfo makes both the active and foreign remote eligible
+        # for scrub except for the instance boundary. Never contact either host.
+        active = self.rob_repos[0]
+        foreign = self.hub_repos[0]
+        for repo, url in ((active, "http://fixture@git.example.net/shared/team/atlas.git"),
+                          (foreign, "https://fixture@hub.example.com/shared/team/atlas.git")):
+            result = _bootstrap.git("remote", "set-url", "origin", url, cwd=repo)
+            self.assertEqual(result.returncode, 0)
+        active_config = Path(active, ".git", "config")
+        foreign_config = Path(foreign, ".git", "config")
+        active_before, foreign_before = active_config.read_bytes(), foreign_config.read_bytes()
+        with patch.object(remotes, "harden_config", return_value=True):
+            stats = remotes.scrub(raw, save_to_store=False, enforce_scope=False)
         self.assertEqual(stats["scanned"], 3)
+        self.assertEqual(stats["cleaned"], 1)
+        self.assertEqual(stats["skipped_by_instance"], {"Hub": len(self.hub_repos)})
+        self.assertEqual(active_config.read_bytes(), active_before.replace(
+            b"fixture@git.example.net", b"git.example.net"))
+        self.assertEqual(foreign_config.read_bytes(), foreign_before)
 
     def test_scrub_with_hub_active_scans_hub_repos(self):
-        """Hand Hub the ROOT walk: its own repos are scanned, the rest are not.
-
-        The 3 globex-only repos sit under the shared root but outside
-        root/acme, so they are excluded by containment and reported as
-        unassigned-to-Hub rather than scrubbed.
-        """
+        """The shared-root walk reports globex's repositories by instance."""
         self.activate("Hub")
         stats = remotes.scrub(self.walk(), save_to_store=False, dry_run=True)
         self.assertEqual(stats["scanned"], len(self.hub_repos))
         self.assertEqual(stats["instance"], "Hub")
         self.assertEqual(stats["skipped_other_instance"], len(self.rob_repos))
-        self.assertEqual(stats["skipped_by_instance"],
-                         {remotes.UNASSIGNED: len(self.rob_repos)})
+        self.assertEqual(stats["skipped_by_instance"], {"globex": len(self.rob_repos)})
 
     def test_scrub_on_hubs_own_subtree_excludes_nothing(self):
-        """The normal path: Hub's dest is already root/acme."""
         self.activate("Hub")
         from pull import _find_git_repos
-        found = _find_git_repos(os.path.join(self.root, "acme"))
+        found = _find_git_repos(self.hub_root)
         stats = remotes.scrub(found, save_to_store=False, dry_run=True)
         self.assertEqual(stats["scanned"], len(self.hub_repos))
         self.assertEqual(stats["skipped_other_instance"], 0)
@@ -256,13 +244,11 @@ class TestUnassignedAndOffsite(_ScopeCase):
 
     def test_repo_under_shared_root_but_no_instance_is_reported_not_scrubbed(self):
         """A hand-made tree in the root is counted, never silently scrubbed."""
-        stray = self.make_repo("acme/atlas/atlas")  # already Hub's
+        stray = self.make_repo("acme/shared/team/atlas", "https://hub.example.com/shared/team/atlas.git")
         self.activate("Hub")
-        stats = remotes.scrub(self.rob_repos + [stray],
-                              save_to_store=False, dry_run=True)
+        stats = remotes.scrub([self.hub_repos[0], stray], save_to_store=False, dry_run=True)
         self.assertEqual(stats["scanned"], 1)
-        self.assertEqual(stats["skipped_by_instance"],
-                         {remotes.UNASSIGNED: len(self.rob_repos)})
+        self.assertEqual(stats["skipped_by_instance"], {remotes.UNASSIGNED: 1})
 
     def test_unassigned_bucket_is_named_on_screen(self):
         scope = self.activate("Hub")
@@ -280,12 +266,14 @@ class TestUnassignedAndOffsite(_ScopeCase):
         self.assertEqual(keep, [outside])
         self.assertEqual(foreign, {})
 
-    def test_folderless_instance_treats_unmatched_root_repos_as_its_own(self):
-        """globex's subtree IS the root, so nothing there is 'unassigned'."""
+    def test_folderless_instance_does_not_claim_unmatched_root_repos(self):
+        stray = self.make_repo("shared/team/atlas", "http://git.example.net/shared/team/atlas.git")
         scope = self.activate("globex")
-        self.assertEqual(scope["base"], scope["root"])
-        for p in self.rob_repos:
-            self.assertEqual(remotes.owner_of(p, scope), "")
+        self.assertEqual(scope["base"], self.root)
+        self.assertEqual(remotes.owner_of(stray, scope), remotes.UNASSIGNED)
+        keep, foreign = remotes.split_by_instance(self.rob_repos + [stray], scope)
+        self.assertCountEqual(keep, self.rob_repos)
+        self.assertEqual(foreign, {remotes.UNASSIGNED: 1})
 
 
 # ─── The screen must state instance + count ───────────────────────────────────
@@ -315,7 +303,7 @@ class TestScopeIsStatedOnScreen(_ScopeCase):
         self.assertIn("globex", out)
         self.assertIn(str(len(self.rob_repos)), out)
         self.assertIn("Hub", out, "the excluded instance must be reported")
-        self.assertNotIn("acme/atlas", out)
+        self.assertNotIn(self.hub_root, out)
 
     def test_print_audit_for_hub_states_hub(self):
         self.activate("Hub")

@@ -67,12 +67,16 @@ from printer import (
 # would also break the legitimate `gitlab-cli clone g /mnt/backup/mirror`,
 # which has exactly the same off-menu property and must stay possible.
 
-def _resolve_dest(cfg: dict, raw=None, what: str = "destination") -> str:
+def _resolve_dest(cfg: dict, raw=None, what: str = "destination", *,
+                  qualify: bool = True) -> str:
     """Absolute destination. The one and only entry point for a dest value."""
     default = paths.anchor(cfg.get("master_dir") or ".")
 
-    if raw is None or not str(raw).strip():
-        return default
+    managed = "layout_host" in cfg
+    if raw is None or (not managed and not str(raw).strip()):
+        return cov.managed_destination(cfg) if managed else default
+    if managed and not str(raw).strip():
+        raise paths.UnsafePath("Destination cannot be empty.")
 
     d = str(raw).strip()
     if os.path.isabs(d):
@@ -81,6 +85,20 @@ def _resolve_dest(cfg: dict, raw=None, what: str = "destination") -> str:
         # Explicit relative: the user's cwd, resolved once, here.
         resolved = os.path.normpath(os.path.join(os.getcwd(), d))
 
+    if managed and qualify:
+        from instances import _base_of, _read_instances
+
+        data, problem = _read_instances()
+        if problem:
+            raise paths.UnsafePath("Cannot verify configured GitLab destination boundaries.")
+        target = paths.managed_root(resolved, cfg["url"])
+        configured = {cov.managed_destination(cfg)}
+        configured.update(paths.managed_root(_base_of(inst), inst["url"])
+                          for inst in data["instances"])
+        if any(root != target and (_is_inside(root, target) or _is_inside(target, root))
+               for root in configured):
+            raise paths.UnsafePath("Destination overlaps a configured GitLab host folder.")
+        resolved = target
     _warn_if_offsite(resolved, default, what)
     return resolved
 
@@ -116,8 +134,13 @@ def group_status(group: dict, dest: str) -> str:
     return "✅" if os.path.exists(local_path) else "❌"
 
 
-def scan_dest(dest: str) -> dict:
+def scan_dest(dest: str, cfg: dict | None = None) -> dict:
     """Index every clone under dest by its origin URL (one walk for the menu)."""
+    if cfg is not None and "layout_host" in cfg:
+        index, unresolved = cov.scan_managed(cov.managed_destination(cfg, dest))
+        if unresolved:
+            print_warn(f"{len(unresolved)} unresolved repo(s) excluded from coverage.")
+        return index
     return cov.scan(dest)
 
 
@@ -237,6 +260,8 @@ def _group_dir(cfg: dict, gpath: str, dest: str, index: dict = None) -> str:
     3. Otherwise the resolver's suggestion, for the error message and for a
        group with nothing on disk yet.
     """
+    if "layout_host" in cfg:
+        return paths.managed_path(cov.managed_destination(cfg, dest), gpath)
     owned = _group_dirs_from_index(cfg, gpath, dest, index or {})
     ownset = set(owned)
     try:
@@ -285,6 +310,8 @@ def _resolves_to(fn, gpath: str, dst: str, target: str, folder) -> bool:
 
 def _action_args(cfg: dict, gpath: str, gdir: str, dest: str) -> tuple:
     """(group_path, dest) to hand cmd_pull / cmd_log so they land on gdir."""
+    if "layout_host" in cfg:
+        return gpath, dest
     target = os.path.normpath(gdir)
     base   = os.path.basename(target)
     parent = os.path.dirname(target)
@@ -302,8 +329,8 @@ def _action_args(cfg: dict, gpath: str, gdir: str, dest: str) -> tuple:
 def _clone_dest(cfg: dict, gpath: str, dest: str, index: dict = None) -> str:
     """dest for cmd_clone / cmd_retry_failed: reuse the tree, never duplicate."""
     gdir = _group_dir(cfg, gpath, dest, index)
-    if not os.path.isdir(gdir):
-        return dest                      # nothing on disk: normal shaping
+    if "layout_host" in cfg or not os.path.isdir(gdir):
+        return dest                      # no legacy reshaping in managed mode
     target = os.path.normpath(gdir)
     folder = cfg.get("folder")
     for dst in (dest, os.path.dirname(target), target):
@@ -385,6 +412,9 @@ def _sync_group(cfg: dict, gpath: str, dest: str, index: dict = None):
     whose clones were just moved is synced at its new location instead of
     failing cmd_pull's "Clone it first" check. Returns the index in use.
     """
+    if "layout_host" in cfg:
+        cmd_pull(cfg, gpath, dest)
+        return index
     index = _reconcile_renames(cfg, gpath, dest, index)
     gdir = _group_dir(cfg, gpath, dest, index)
     gp, dst = _action_args(cfg, gpath, gdir, dest)
@@ -393,6 +423,25 @@ def _sync_group(cfg: dict, gpath: str, dest: str, index: dict = None):
     # deleted projects) are cleaned only after the pull has run.
     index = _prune_leftovers(cfg, gpath, dest, index)
     return index
+
+
+def _retry_count(cfg: dict, gpath: str, dest: str, index: dict = None) -> int:
+    if "layout_host" in cfg:
+        from clone import load_errors
+
+        try:
+            return len(load_errors(cov.managed_destination(cfg, dest), gpath, managed=True))
+        except (OSError, ValueError):
+            print_warn("Managed retry log is unresolved.")
+            return 0
+    import json
+
+    path = _err_log_path(cfg, gpath, dest, index)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return len(json.load(fh).get("errors", []))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
 
 
 def _err_log_path(cfg: dict, gpath: str, dest: str, index: dict = None) -> str:
@@ -513,7 +562,7 @@ def _instance_orphans(cfg: dict, index: dict, projects, probe: bool = True):
     orphan — the same class of confident-wrong report this wave exists to end —
     so the sweep is SKIPPED and the caller discloses that it was.
     """
-    if projects is None:
+    if projects is None or not getattr(projects, "complete", True):
         return []
     try:
         return cov.instance_orphans(cfg, index, projects, probe=probe)
@@ -690,23 +739,25 @@ def _instance_coverage_counts(cfg: dict, index: dict, projects=_UNSET):
         projs, note = _instance_projects(cfg)
     else:
         projs, note = projects, ""
-    if not projs or note:
+    if not projs or note or not getattr(projs, "complete", True):
         return None
     try:
-        counts = cov.coverage_counts(projs, index, cov.host_of(cfg["url"]))
+        host, _ = cov.project_key(cfg, "")
+        options = {"exact": True} if "layout_host" in cfg else {}
+        counts = cov.coverage_counts(projs, index, host, **options)
     except Exception:                       # noqa: BLE001
         return None
     return counts if cov.coverage_consistent(counts) else None
 
 
-def _orphans_under(orphans, full_path: str) -> list:
+def _orphans_under(orphans, full_path: str, *, exact: bool = False) -> list:
     """The instance orphan list, narrowed to one group's namespace.
 
     Narrowing a complete list is not the same as asking per group: the record
     for a clone whose top-level group no longer exists still EXISTS here, it
     simply does not match this prefix. That is the difference between 29 and 6.
     """
-    pre = (full_path or "").strip("/").lower()
+    pre = full_path if exact else (full_path or "").strip("/").lower()
     if not pre:
         return []
     return [o for o in (orphans or ())
@@ -724,7 +775,8 @@ def pick_group(cfg: dict, dest: str) -> dict:
         return {"_bulk": "none"}
 
     print_info("Checking what is already on disk...")
-    index   = scan_dest(dest)
+    managed = "layout_host" in cfg
+    index = scan_dest(dest, cfg) if managed else scan_dest(dest)
 
     # W10. Snapshot the failure ledger instead of clearing it: api records
     # EVERY failure it sees whether or not `quiet` printed a line, and a
@@ -753,8 +805,9 @@ def pick_group(cfg: dict, dest: str) -> dict:
         lock   = "🔒" if vis == "private" else "🌐"
         desc   = g.get("description") or ""
         dstr   = f"  {DIM}{desc[:45]}{RESET}" if desc else ""
-        err_path = _err_log_path(cfg, g["full_path"], dest, index)
-        err_mark = f" {RED}⚠{RESET}" if os.path.exists(err_path) else ""
+        pending_retry = (_retry_count(cfg, g["full_path"], dest, index) if managed
+                         else os.path.exists(_err_log_path(cfg, g["full_path"], dest, index)))
+        err_mark = f" {RED}⚠{RESET}" if pending_retry else ""
         # W10. "empty" is an ANSWER. A group whose listing failed has a zero
         # denominator for the same reason a genuinely empty group does, and
         # printing the same word for both is the confident-wrong report this
@@ -790,7 +843,9 @@ def pick_group(cfg: dict, dest: str) -> dict:
     user_ns = ({"total": int(counts.get("user_total", 0)),
                 "present": int(counts.get("user_present", 0))}
                if counts else None)
-    if counts and counts.get("group_total") == total:
+    if managed and any(not c.get("complete", True) for c in covmap.values()):
+        line = "Group coverage UNKNOWN — project listing incomplete"
+    elif counts and counts.get("group_total") == total:
         # The two group denominators agree (recursive-per-group sum == flat
         # namespace.kind=='group' count), so the roll-up can be rendered by
         # the shared sentence. When they DISAGREE the accounting no longer
@@ -894,18 +949,19 @@ def pick_group(cfg: dict, dest: str) -> dict:
                 selected["_cov"]    = covmap[selected["id"]]
                 selected["_index"]  = index
                 selected["_orphans"] = _orphans_under(orphans,
-                                                      selected["full_path"])
+                                                      selected["full_path"], exact=managed)
                 return selected
             print(f"  {RED}Pick a number from 1 to {len(groups)}.{RESET}")
             continue
 
-        matches = [g for g in groups if low in g["full_path"].lower()]
+        matches = ([g for g in groups if choice == g["full_path"]] if managed
+                   else [g for g in groups if low in g["full_path"].lower()])
         if len(matches) == 1:
             matches[0]["_status"] = statuses[matches[0]["id"]]
             matches[0]["_cov"]    = covmap[matches[0]["id"]]
             matches[0]["_index"]  = index
             matches[0]["_orphans"] = _orphans_under(orphans,
-                                                    matches[0]["full_path"])
+                                                    matches[0]["full_path"], exact=managed)
             return matches[0]
         elif len(matches) > 1:
             print(f"  {YELLOW}Several matches found:{RESET}")
@@ -937,9 +993,6 @@ def pick_action(status: str, has_errors: bool = False, info: dict = None,
         print(f"  {CYAN}2.{RESET}  📋  Log     — show the latest commits")
         print(f"  {CYAN}3.{RESET}  🔗  Remotes — remotes of each repo")
         valid = ["1", "2", "3"]
-        if has_errors:
-            print(f"  {CYAN}4.{RESET}  🔁  Retry   — {RED}retry the failed projects{RESET}")
-            valid.append("4")
         # Clone stays available for a group that is only partly on disk —
         # sync can never fetch a project that was never cloned.
         if can_clone:
@@ -947,6 +1000,10 @@ def pick_action(status: str, has_errors: bool = False, info: dict = None,
                     else f"  {DIM}(nothing missing){RESET}")
             print(f"  {CYAN}5.{RESET}  📥  Clone   — fetch the missing projects{note}")
             valid.append("5")
+
+    if has_errors and can_clone:
+        print(f"  {CYAN}4.{RESET}  🔁  Retry   — {RED}retry the failed projects{RESET}")
+        valid.append("4")
 
     print(f"\n  {YELLOW}b{RESET}  back   {YELLOW}q{RESET}  exit\n")
 
@@ -1059,8 +1116,15 @@ def _remotes_scope_and_repos(cfg: dict, dest: str):
 
     repos = _find_git_repos(dest)
     scope = remotes.active_scope()
+    if "layout_host" in cfg and (not scope or scope.get("root") != cfg["master_dir"]
+                                or scope.get("authority") != paths.gitlab_authority(cfg["url"])):
+        raise paths.UnsafePath("Cannot verify the active GitLab remote-audit scope.")
     in_scope, foreign = remotes.split_by_instance(repos, scope)
     return scope, in_scope, foreign
+
+
+def _scrubbable_remote_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if row["has_creds"] and not row.get("local_only")]
 
 
 def _run_remotes(cfg: dict):
@@ -1090,7 +1154,7 @@ def _run_remotes(cfg: dict):
     rows = remotes.audit(repos, check_network=False, scope=scope)
     remotes.print_audit(rows)
 
-    leaky = [r for r in rows if r["has_creds"]]
+    leaky = _scrubbable_remote_rows(rows)
     if not leaky:
         return
 
@@ -1111,7 +1175,7 @@ def _run_remotes(cfg: dict):
     if ans != "y":
         return
 
-    stats = remotes.scrub(repos, save_to_store=True, scope=scope)
+    stats = remotes.scrub([row["path"] for row in leaky], save_to_store=True, scope=scope)
     print_info(f"instance: {stats.get('instance', '?')}   "
                f"cleaned: {stats['cleaned']}   "
                f"creds saved: {stats['saved']}   failed: {stats['failed']}")
@@ -1413,8 +1477,6 @@ def interactive_mode(cfg: dict):
                       f"{RESET}")
             print_separator()
 
-            # Upstream renames are applied INSIDE cmd_clone (_process_group ->
-            # try_rename_repair), so no separate reconcile_renames() pass here.
             def _clone_one(g, _cfg=cfg, _dest=dest, _index=index):
                 cmd_clone(_cfg, g["full_path"],
                           _clone_dest(_cfg, g["full_path"], _dest, _index))
@@ -1451,18 +1513,8 @@ def interactive_mode(cfg: dict):
         # One directory, derived once, from the same index the icon used.
         gdir       = _group_dir(cfg, gpath, dest, index)
         cdest      = _clone_dest(cfg, gpath, dest, index)
-        err_path   = _err_log_path(cfg, gpath, dest, index)
-        err_count  = 0
-        has_errors = False
-        if os.path.exists(err_path):
-            try:
-                import json
-                with open(err_path) as fh:
-                    err_count = len(json.load(fh).get("errors", []))
-                has_errors = err_count > 0
-            except Exception:
-                has_errors = False
-
+        err_count  = _retry_count(cfg, gpath, dest, index)
+        has_errors = err_count > 0
         gcov = group.get("_cov") or {}
         if status == UNKNOWN_ICON:
             # W10. The listing FAILED for this group. Saying "not cloned"
@@ -1506,8 +1558,9 @@ def interactive_mode(cfg: dict):
         print()
         print_separator()
 
-        if status == "❌" or action == "5":
-            # Renames are repaired inside cmd_clone itself.
+        if action == "4":
+            cmd_retry_failed(cfg, gpath, cdest)
+        elif status == "❌" or action == "5":
             cmd_clone(cfg, gpath, cdest)
         else:
             if action == "1":
@@ -1519,17 +1572,11 @@ def interactive_mode(cfg: dict):
                 cmd_log(cfg, gp, dst, since, author)
             elif action == "3":
                 import remotes
-                from pull import _find_git_repos
-                # Was os.path.join(dest, last component): on a shared
-                # master_dir that audited (and offered to rewrite) another
-                # instance's repos.
-                repos = _find_git_repos(gdir) if os.path.isdir(gdir) else []
+                scope, repos, _ = _remotes_scope_and_repos(cfg, gdir)
                 if repos:
-                    remotes.print_audit(remotes.audit(repos, check_network=False))
+                    remotes.print_audit(remotes.audit(repos, check_network=False, scope=scope))
                 else:
                     print_warn(f"There is no repo in {gdir}.")
-            elif action == "4":
-                cmd_retry_failed(cfg, gpath, cdest)
 
         _ask_next()
         print()
@@ -1758,6 +1805,8 @@ def print_usage():
                                       tighten .git/config + reflog to 0600
                                       across every clone; --dry-run reports
                                       what it would change and changes nothing
+  gitlab-cli remote-count <namespace/project> [...]
+                                      count other remotes without fetching
   gitlab-cli instances                list the configured GitLabs
   gitlab-cli mcp                      run the MCP server over stdio (for AI
                                       agents; reads free, writes need a
@@ -1771,7 +1820,8 @@ def print_usage():
   attach to a bug report.{RESET}
 
 {DIM}  [dir] is optional. Left out, it is the managed folder from your
-  instance config. A relative [dir] is resolved against your CURRENT
+  instance config. For clone, sync and log, an explicit [dir] is a base;
+  the active hostname is appended. Relative paths use your CURRENT
   directory, like any other Unix tool — and you get a warning when that
   lands outside the managed folder, because the menu will not list it.{RESET}
 
@@ -1795,7 +1845,7 @@ def _cmd_remotes_cli(cfg: dict, argv: list):
     # else, and says so when that is outside the managed tree.
     positional = [a for a in argv if not a.startswith("-")]
     dest = _resolve_dest(cfg, positional[0] if positional else None,
-                         "remotes folder")
+                         "remotes folder", qualify=False)
     scope, repos, foreign = _remotes_scope_and_repos(cfg, dest)
     who = remotes.scope_label(scope)
     if not repos:
@@ -1806,7 +1856,8 @@ def _cmd_remotes_cli(cfg: dict, argv: list):
         return
     rows = remotes.audit(repos, check_network=False, scope=scope)
     remotes.print_audit(rows)
-    if "--fix" in argv:
+    leaky = _scrubbable_remote_rows(rows)
+    if "--fix" in argv and leaky:
         # W9-2 / W8-2-H3. `--fix` is non-interactive and has NO prompt at all:
         # it rewrites remote URLs on disk with nothing on screen saying what
         # it is about to touch. A flag may legitimately skip the PROMPT; it
@@ -1816,7 +1867,7 @@ def _cmd_remotes_cli(cfg: dict, argv: list):
         print_warn("--fix rewrites remote URLs on disk. No confirmation is "
                    "asked for, so here is exactly what it covers:")
         print(f"  {BOLD}{remotes.confirm_scrub_message(rows, scope)}{RESET}")
-        stats = remotes.scrub(repos, save_to_store=True, scope=scope)
+        stats = remotes.scrub([row["path"] for row in leaky], save_to_store=True, scope=scope)
         print_info(f"instance: {stats.get('instance', who)}   "
                    f"cleaned: {stats['cleaned']}   saved: {stats['saved']}   "
                    f"failed: {stats['failed']}   "
@@ -2135,7 +2186,7 @@ def main() -> int:
     context = "gitlab-cli " + (" ".join(args) if args else "(interactive)")
 
     try:
-        _run(args)
+        return _run(args) or EXIT_OK
     except KeyboardInterrupt:
         # Unchanged contract: Ctrl-C is a user decision, not a failure.
         # clone.py restores the SIGINT handler in its own try/finally, which
@@ -2146,7 +2197,6 @@ def main() -> int:
         return _report_fatal(exc, context, debug)
     except Exception as exc:                # noqa: BLE001 - this IS the boundary
         return _report_fatal(exc, context, debug)
-    return EXIT_OK
 
 
 def _run_sidecar(args: list):
@@ -2168,11 +2218,46 @@ def _run_sidecar(args: list):
     return report_cli.main(args[1:])
 
 
+def _cmd_remote_count(namespaces: list[str]) -> int:
+    """Read local remote names without setup, token resolution or transport."""
+    from git import managed_source
+    from instances import _base_of, _read_instances
+
+    if not namespaces:
+        print_error("Usage: gitlab-cli remote-count <namespace/project> [...]")
+        return 1
+    data, problem = _read_instances()
+    active = [inst for inst in data["instances"] if inst["name"] == data["active"]]
+    if problem or len(active) != 1:
+        print_error("unresolved: no usable active GitLab instance")
+        return 1
+    try:
+        root = paths.managed_root(_base_of(active[0]), active[0]["url"])
+    except (OSError, ValueError, TypeError):
+        print_error("unresolved: invalid active GitLab destination")
+        return 1
+    failed = False
+    for i, namespace in enumerate(namespaces, 1):
+        label = f"argument {i}"
+        try:
+            repo = paths.managed_path(root, namespace)
+            label = paths.managed_namespace(root, repo)
+            selected, remotes = managed_source(repo, root)
+        except (OSError, ValueError):
+            print(f"{label}: unresolved (no verified managed repository/source)")
+            failed = True
+        else:
+            print(f"{label}: {len(set(remotes) - {selected})}")
+    return int(failed)
+
+
 def _run(args: list):
     code = _run_sidecar(args)
     if code is not None:
         raise SystemExit(code)
 
+    if args and args[0] == "remote-count":
+        return _cmd_remote_count(args[1:])
     print_banner()
 
     # Commands that do not need an active config
@@ -2196,8 +2281,6 @@ def _run(args: list):
         sys.exit(0)
     _activate_instance(cfg)
 
-    dest = _resolve_dest(cfg)
-
     try:
         if not args:
             interactive_mode(cfg)
@@ -2208,7 +2291,6 @@ def _run(args: list):
                 sys.exit(1)
             _d = _resolve_dest(cfg, args[2] if len(args) > 2 else None,
                                "clone destination")
-            # Renames are repaired inside cmd_clone itself.
             cmd_clone(cfg, args[1], _clone_dest(cfg, args[1], _d))
 
         elif args[0] in ("pull", "sync"):

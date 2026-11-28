@@ -242,8 +242,11 @@ in between.
 | `gitlab_mr_merge` | The MR head `sha` | GitLab rejects the merge if someone pushed after the preview. |
 | `gitlab_mr_approve` | The MR head `sha` | GitLab rejects the approval (409) if someone pushed after the preview. |
 | `gitlab_mr_create` | `description_sha256` of the text that will be sent | A description that changed after the preview is rejected. |
+| `gitlab_sync_local`, `gitlab_clone_missing` (managed host layout) | `scope_sha256` of the full selection or clone inventory | A changed scope between preview and confirmation is refused, including changes beyond the capped display. |
 
-None of these tools takes a `sha` argument.
+None of these tools takes a `sha` argument. Managed clone previews require
+complete GitLab project pages; incomplete pages fail closed with no writable
+plan. Confirmed actions recompute the scope digest before touching clones.
 
 ### Rejections
 
@@ -368,7 +371,16 @@ The hardening described in the next section is what makes that safe.
 Three tools work on the local disk: `gitlab_local_status`,
 `gitlab_sync_local` and `gitlab_clone_missing`. They act only inside the
 instance's **managed directory**. This is `master_dir` from the instance
-config, anchored to an absolute path.
+config, anchored to an absolute path. Managed layout is
+`MasterGroups/<host>/<full/namespace/path/repo>`; the legacy `folder` is
+metadata only. Instances on one host with different scheme or port are
+refused. No old-layout checkout is moved automatically; the offline
+`scripts/preview_host_layout.py` reads evidence and previews only.
+
+Managed clone and sync select only the checkout's instance source. HTTP(S)
+remotes must match configured scheme, host and port plus exact namespace;
+SSH remotes must match host and exact namespace. Ambiguous or mismatched
+sources are refused, not fetched. `gitlab_local_status` is offline.
 
 **Confinement to `master_dir`.**
 

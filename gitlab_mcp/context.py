@@ -510,12 +510,15 @@ class GitLabContext:
             server's ``X-Total`` count when it sends one, else ``None``.
 
         Raises:
-            GitLabError: on any failing page.
+            GitLabError: on any failing page, an ``X-Next-Page`` that cannot
+                be followed (non-numeric or non-advancing), or a complete walk
+                from page 1 that holds fewer items than ``X-Total``.
         """
         ceiling = max_items if max_items is not None else limit
         query: dict = dict(params or {})
         query.setdefault("per_page", 100)
         page = int(query.pop("page", 1) or 1)
+        started_at_first_page = page == 1
 
         items: list = []
         total: int | None = None
@@ -527,8 +530,6 @@ class GitLabContext:
             data = self._parse(res, path)
             if total is None:
                 total = _int_header(res, "X-Total")
-            if data is None:
-                break
             if not isinstance(data, list):
                 raise GitLabHTTPError(
                     f"expected a JSON list from {path}, got "
@@ -536,17 +537,38 @@ class GitLabContext:
                     url=path, secrets=(self.__token,))
             items.extend(data)
 
+            try:
+                nxt = _next_page(res)
+            except ValueError:
+                # A keyset cursor or a rewritten header cannot be followed;
+                # treating it as the end would report a partial set as whole.
+                raise GitLabHTTPError(
+                    f"unsupported non-numeric X-Next-Page value after page "
+                    f"{page} of {path}", status=res.status_code, url=path,
+                    secrets=(self.__token,)) from None
+            if nxt is not None and nxt <= page:
+                raise GitLabHTTPError(
+                    f"non-advancing X-Next-Page {nxt} after page {page} of "
+                    f"{path}", status=res.status_code, url=path,
+                    secrets=(self.__token,))
+
             if ceiling is not None and len(items) >= ceiling:
-                truncated = (len(items) > ceiling
-                             or _next_page(res) is not None)
+                truncated = len(items) > ceiling or nxt is not None
                 items = items[:ceiling]
                 break
 
-            nxt = _next_page(res)
             if nxt is None:
                 break
             page = nxt
 
+        # Only a shortfall is an error: more than X-Total is a live instance
+        # growing mid-walk. A walk started mid-set is short by construction.
+        if (not truncated and started_at_first_page and total is not None
+                and len(items) < total):
+            raise GitLabHTTPError(
+                f"truncated: the server reports {total} record(s) for {path} "
+                f"but only {len(items)} were received", status=0, url=path,
+                secrets=(self.__token,))
         return items, truncated, total
 
     # -- id lookups ---------------------------------------------------------
@@ -630,8 +652,17 @@ def _int_header(res: requests.Response, name: str) -> int | None:
 
 
 def _next_page(res: requests.Response) -> int | None:
-    """The next page number from ``X-Next-Page``, or ``None`` at the end."""
-    return _int_header(res, "X-Next-Page")
+    """The next page number from ``X-Next-Page``, or ``None`` at the end.
+
+    Raises:
+        ValueError: the header is nonempty but not an ASCII page number.
+    """
+    raw = (res.headers.get("X-Next-Page") or "").strip()
+    if not raw:
+        return None
+    if raw.isascii() and raw.isdigit():
+        return int(raw)
+    raise ValueError(raw)
 
 
 def _id_of(data: Any, what: str) -> int:

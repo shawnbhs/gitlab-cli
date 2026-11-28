@@ -94,6 +94,10 @@ def ensure_setup():
     Returns the active instance config, or None if setup has not been done
     or the user cancelled.
     """
+    problem = I.instances_file_problem()
+    if problem:
+        print_error(problem)
+        return None
     try:
         os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     except OSError as e:
@@ -961,9 +965,14 @@ def _coverage_check(name: str, cfg: dict, index, host: str, problems: list):
     reachable, excluded, scope = partition_by_policy(projs, cfg, scope=scope)
     projs = reachable
 
+    import coverage as _cov
+
+    def project_path(project):
+        return _cov.project_key(cfg, project.get("path_with_namespace") or "")[1]
+
     want = {}
     for p in projs:
-        pwn = (p.get("path_with_namespace") or "").lower()
+        pwn = project_path(p)
         if not pwn:
             continue
         want.setdefault(pwn.split("/")[0], set()).add(pwn)
@@ -995,7 +1004,7 @@ def _coverage_check(name: str, cfg: dict, index, host: str, problems: list):
     # suffix belongs here too, even when /projects no longer lists it.
     pending_paths = set()
     for p in pending:
-        pwn = (p.get("path_with_namespace") or "").lower()
+        pwn = project_path(p)
         pending_paths.update((pwn, _PENDING_RE.sub("", pwn)))
     pending_paths.discard("")
     pending_on_disk = {k for k in have_keys
@@ -1015,7 +1024,7 @@ def _coverage_check(name: str, cfg: dict, index, host: str, problems: list):
 
     # The user-namespace population — disclosed in EVERY scope, never silent.
     on_disk = len([p for p in excluded
-                   if (host, (p.get("path_with_namespace") or "").lower())
+                   if (host, project_path(p))
                    in have_keys])
     _user_ns_report(name, cfg, excluded, scope, scope_note, projs, problems,
                     excluded_on_disk=on_disk)
@@ -1028,7 +1037,7 @@ def _coverage_check(name: str, cfg: dict, index, host: str, problems: list):
     # instance, and calling it an orphan would be a false claim of the exact
     # kind this project forbids — an exclusion must never mutate into a
     # different, wrong-sounding finding.
-    everything = {(p.get("path_with_namespace") or "").lower()
+    everything = {project_path(p)
                   for p in list(projs) + list(excluded)}
     # A pending-deletion project's clones (at its original or its renamed
     # path) were disclosed above; they are not orphans either.
@@ -1086,6 +1095,12 @@ def _layout_check(name: str, cfg: dict, inv: dict, host: str, problems: list):
         _mark("layout matches the config", "unknown", inv["reason"])
         return
 
+    if inv.get("unresolved"):
+        detail = f"{inv['unresolved']} checkout(s) could not be verified"
+        _mark("one directory per project", "unknown", detail)
+        _mark("layout matches the config", "unknown", detail)
+        return
+
     dest = os.path.normpath(cfg["master_dir"])
     mine = {k: v for k, v in inv["by_key"].items() if k[0] == host}
 
@@ -1108,7 +1123,9 @@ def _layout_check(name: str, cfg: dict, inv: dict, host: str, problems: list):
     for (_host, pwn), dirs in mine.items():
         expected = os.path.join(dest, *pwn.split("/"))
         for d in dirs:
-            if os.path.normpath(d).lower() != expected.lower():
+            actual = os.path.normpath(d)
+            mismatch = actual != expected if "layout_host" in cfg else actual.lower() != expected.lower()
+            if mismatch:
                 off.append((pwn, d))
     _mark("layout matches the config", "ok" if not off else "warn",
           f"{len(off)} clone(s) sit where the current config would not put them"
@@ -1135,6 +1152,18 @@ def _config_completeness_check(name: str, cfg: dict, inv: dict, host: str,
     if not inv["ok"]:
         _mark("config matches the disk", "unknown", inv["reason"])
         problems.append(f"[{name}] config/disk consistency UNKNOWN — {inv['reason']}")
+        return
+
+    if "layout_host" in cfg:
+        root = cfg["master_dir"]
+        mine = [(pwn, d) for (h, pwn), dirs in inv["by_key"].items() if h == host for d in dirs]
+        if not mine or inv.get("unresolved"):
+            _mark("config matches the disk", "unknown", "no complete verified managed inventory")
+            return
+        if any(d != os.path.join(root, *pwn.split("/")) for pwn, d in mine):
+            _mark("config matches the disk", "warn", "clones outside their exact managed paths")
+            return
+        _mark("config matches the disk", "ok", f"{len(mine)} clones under {root}")
         return
 
     base = os.path.normpath(cfg["base_dir"])
@@ -1255,6 +1284,10 @@ def _error_log_check(name: str, problems: list):
 def _instance_check(deep: bool = True) -> list[str]:
     """For each GitLab: is there a token? does it connect? what access does it have?"""
     problems = []
+    problem = I.instances_file_problem()
+    if problem:
+        _mark("GitLab configured", "unknown", problem)
+        return [problem]
     insts = I.list_instances()
 
     if not insts:
@@ -1266,7 +1299,13 @@ def _instance_check(deep: bool = True) -> list[str]:
         name = inst["name"]
         print(f"\n  {BOLD}{WHITE}{name}{RESET} {DIM}{inst['url']}{RESET}")
 
-        token = creds.resolve_token(inst)
+        try:
+            cfg = I.build_cfg(inst)
+        except (OSError, ValueError, TypeError):
+            _mark("managed root", "fail", "invalid or inaccessible host folder")
+            problems.append(f"[{name}] invalid managed destination; instance not checked")
+            continue
+        token = cfg["token"]
         if not token:
             _check("token", False, f"not found ({inst.get('token_env','?')})")
             problems.append(f"[{name}] Token missing — no token found in "
@@ -1274,7 +1313,7 @@ def _instance_check(deep: bool = True) -> list[str]:
             continue
         _check("token", True, creds.mask(token))
 
-        info = caps.get(I.build_cfg(inst), force=True)
+        info = caps.get(cfg, force=True)
         online = bool(info.get("ok"))
         if not online:
             err = info.get("error", "") or "no answer from the server"
@@ -1306,7 +1345,6 @@ def _instance_check(deep: bool = True) -> list[str]:
                    warn=True)
 
         # Folder — always absolute, so it cannot depend on the cwd
-        cfg  = I.build_cfg(inst)
         d    = cfg["master_dir"]
         ex   = os.path.isdir(d)
         n    = len(os.listdir(d)) if ex else 0
@@ -1327,7 +1365,7 @@ def _instance_check(deep: bool = True) -> list[str]:
         t0 = time.time()
         try:
             import coverage as _cov
-            host = _cov.host_of(cfg["url"])
+            host, _ = _cov.project_key(cfg, "")
         except Exception as e:
             _mark("deep checks", "unknown",
                   f"coverage module unavailable ({e.__class__.__name__})")
@@ -1335,14 +1373,25 @@ def _instance_check(deep: bool = True) -> list[str]:
                             f"coverage module unavailable")
             continue
 
+        managed = "layout_host" in cfg
         inv = _inventory(d)
 
-        # The authoritative index the menu itself uses (origin via git), so
+        # The authoritative index the menu itself uses, so
         # doctor and the menu can never disagree about what is cloned.
         index = None
         try:
-            index = {k for k in _cov.scan(d) if k[0] == host}
+            if managed:
+                index, unresolved = _cov.scan_managed(_cov.managed_destination(cfg))
+                inv["by_key"] = {k: [repo] for k, repo in index.items()}
+                inv["unresolved"] = len(unresolved)
+                if unresolved:
+                    _mark("managed checkout identity", "unknown", f"{len(unresolved)} unresolved repo(s)")
+                    problems.append(f"[{name}] {len(unresolved)} checkout(s) could not be verified")
+            else:
+                index = {k for k in _cov.scan(d) if k[0] == host}
         except Exception as e:
+            if managed:
+                inv["unresolved"] = max(1, inv["repos"])
             _mark("scan destination", "unknown",
                   f"{d}: {e.__class__.__name__}")
 
@@ -1377,6 +1426,10 @@ def _instance_check(deep: bool = True) -> list[str]:
             _mark("coverage", "unknown",
                   "the instance is unreachable — the project list is unknown")
             problems.append(f"[{name}] coverage UNKNOWN — instance unreachable")
+
+        if managed:
+            _note("Legacy and offsite clones are outside this check; use the migration preview.")
+            continue
 
         # Clones of this GitLab that live OUTSIDE the configured folder.
         # A cwd-relative dest used to scatter them; each stray tree is a full
@@ -1443,6 +1496,5 @@ def doctor(argv: list = None):
 
 def run_setup():
     """Wizard for adding a new GitLab (the `setup` command)."""
-    import instances as I
     _welcome()
     return I.add_instance(quiet_header=True)

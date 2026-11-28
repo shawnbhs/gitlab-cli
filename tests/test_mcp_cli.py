@@ -966,6 +966,24 @@ class TestWriteFlow(unittest.TestCase):
         run_cli(["clone-missing", "group-a"], answers=["y"])
         self.assertEqual(do_mock.call_args.kwargs, {"group": "group-a"})
 
+    def test_sync_passes_approved_scope_from_preview(self) -> None:
+        digest = "a" * 64
+        _, do_mock = self.patch_pair(
+            "sync_local", preview("sync_local", scope_sha256=digest))
+        code, _, err = run_cli(["sync", "--group", "group-a"], answers=["y"])
+        self.assertEqual(code, 0, msg=err)
+        do_mock.assert_called_once_with(
+            mock.ANY, group="group-a", project=None, scope_sha256=digest)
+
+    def test_clone_missing_passes_approved_scope_from_preview(self) -> None:
+        digest = "b" * 64
+        _, do_mock = self.patch_pair(
+            "clone_missing", preview("clone_missing", scope_sha256=digest))
+        code, _, err = run_cli(["clone-missing", "group-a"], answers=["y"])
+        self.assertEqual(code, 0, msg=err)
+        do_mock.assert_called_once_with(
+            mock.ANY, group="group-a", scope_sha256=digest)
+
     def test_mr_create_passes_every_field(self) -> None:
         _, do_mock = self.patch_pair("mr_create", preview("mr_create"))
         run_cli(["mr-create", "group-a/project-a", "feature", "develop",
