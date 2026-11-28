@@ -1,4 +1,4 @@
-# paths.py — Resolving the local directory of a group
+# paths.py — Managed GitLab paths and legacy group lookup
 #
 # A group can be nested (`company/team`) and, depending on how it was
 # cloned, it may live in more than one place. Every module
@@ -7,6 +7,13 @@
 
 import json
 import os
+import re
+from ipaddress import IPv4Address
+from pathlib import Path
+from stat import S_ISDIR
+from urllib.parse import urlsplit
+
+import idna
 
 # The directory this CLI is installed in. A relative master_dir is resolved
 # against it, never against the current working directory: the launcher is an
@@ -26,7 +33,156 @@ def anchor(dest: str) -> str:
 
 
 class UnsafePath(ValueError):
-    """group_path tried to escape the destination directory (path traversal)."""
+    """Invalid or unsafe managed or legacy path input."""
+
+
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_NAMESPACE_SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+_WINDOWS_DEVICES = {"con", "prn", "aux", "nul"} | {
+    f"{name}{digit}" for name in ("com", "lpt") for digit in "123456789"
+}
+_HTTP_PORTS = {"http": 80, "https": 443}
+
+
+def _clean_url(url: str) -> bool:
+    # urlsplit silently removes some control characters. Reject before parsing.
+    return (isinstance(url, str) and bool(url) and not any(
+        c.isspace() or ord(c) < 32 or ord(c) == 127 or c in "\\?#" for c in url
+    ))
+
+
+def _hostname(host: str) -> str:
+    # Match requests' nontransitional UTS 46 IDNA; stdlib IDNA 2003 can
+    # collapse distinct names (for example, faß and fass).
+    host = idna.encode(host, uts46=True).decode("ascii").removesuffix(".")
+    labels = host.split(".")
+    if not all(_DNS_LABEL.fullmatch(label) for label in labels):
+        raise ValueError
+    if labels[0] in _WINDOWS_DEVICES:
+        raise ValueError
+    # Reject legacy short, octal and hexadecimal IP spellings, which clients
+    # can route to a different canonical host than the spelling suggests.
+    if re.fullmatch(r"[0-9]+|0x[0-9a-f]*", labels[-1]):
+        return str(IPv4Address(host))
+    return host
+
+
+def _url_host_port(authority: str) -> tuple[str, int | None]:
+    # IPv6 literals are intentionally unsupported as managed folder names.
+    host, colon, raw_port = authority.partition(":")
+    if not colon:
+        return _hostname(host), None
+    if not re.fullmatch(r"[0-9]{1,5}", raw_port) or not 1 <= int(raw_port) <= 65535:
+        raise ValueError
+    return _hostname(host), int(raw_port)
+
+
+def gitlab_authority(url: str) -> tuple[str, str, int]:
+    """Canonical (scheme, host, effective port) for an instance base URL."""
+    if _clean_url(url):
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme in _HTTP_PORTS and parsed.path in ("", "/"):
+                host, port = _url_host_port(parsed.netloc)
+                return parsed.scheme, host, port or _HTTP_PORTS[parsed.scheme]
+        except ValueError:
+            pass
+    raise UnsafePath("Invalid GitLab instance URL: use an HTTP(S) host with an optional port and no credentials or path.")
+
+
+def gitlab_host(url: str) -> str:
+    """Hostname used as the managed directory for a GitLab instance."""
+    return gitlab_authority(url)[1]
+
+
+def _directory_chain(path: Path) -> None:
+    for part in (*reversed(path.parents), path):
+        try:
+            mode = part.lstat().st_mode
+        except FileNotFoundError:
+            # Missing directories are valid proposed targets.
+            return
+        except OSError:
+            raise UnsafePath("Cannot inspect managed path.") from None
+        if not S_ISDIR(mode):
+            raise UnsafePath("Managed paths must be directories without symlinks.")
+
+
+def managed_root(base: str, url: str) -> str:
+    """Return the absolute and link-free host child of the configured base."""
+    return managed_path(anchor(os.fspath(base)), gitlab_host(url))
+
+
+def _namespace_parts(namespace: str) -> list[str]:
+    if not isinstance(namespace, str):
+        raise UnsafePath("Invalid GitLab namespace path.")
+    parts = namespace.split("/")
+    if any(not _NAMESPACE_SEGMENT.fullmatch(part) or part.endswith(".")
+           or part.split(".", 1)[0].lower() in _WINDOWS_DEVICES for part in parts):
+        raise UnsafePath("Invalid GitLab namespace path.")
+    return parts
+
+
+def managed_path(root: str, namespace: str) -> str:
+    """Append the exact namespace under the host root; never use legacy paths."""
+    path = Path(anchor(os.fspath(root))).joinpath(*_namespace_parts(namespace))
+    _directory_chain(path)
+    return str(path)
+
+
+def managed_namespace(root: str, repo: str) -> str:
+    """Invert a contained project path without resolving symbolic links."""
+    root = Path(anchor(os.fspath(root)))
+    path = Path(repo)
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        raise UnsafePath("Project directory is outside the managed root.") from None
+    if len(parts) < 2:
+        raise UnsafePath("Managed project needs a namespace and repository.")
+    namespace = "/".join(parts)
+    managed_path(root, namespace)
+    return namespace
+
+
+_SCP_USER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+_USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})+")
+
+
+def remote_identity(url: str) -> tuple[str, str] | None:
+    """Return host and exact project namespace from an effective Git URL."""
+    if not _clean_url(url):
+        return None
+    try:
+        if "://" in url:
+            parsed = urlsplit(url)
+            # Git transport scheme names are case-sensitive, unlike urlsplit.
+            if (url.partition(":")[0] not in (*_HTTP_PORTS, "ssh")
+                    or not parsed.path.startswith("/")):
+                return None
+            userinfo, at, authority = parsed.netloc.rpartition("@")
+            if at:
+                allowed = _SCP_USER if parsed.scheme == "ssh" else _USERINFO
+                if not allowed.fullmatch(userinfo):
+                    return None
+            host, _ = _url_host_port(authority)
+            path = parsed.path[1:]
+        else:
+            authority, colon, path = url.partition(":")
+            if not colon or re.fullmatch(r"[A-Za-z]", authority):
+                return None
+            user, at, host = authority.rpartition("@")
+            if at and not _SCP_USER.fullmatch(user):
+                return None
+            host = _hostname(host)
+        # GitLab's transport suffix is optional. Do not strip separators,
+        # fold case, decode ambiguous escapes, or strip multiple suffixes.
+        namespace = path.removesuffix(".git")
+        if len(_namespace_parts(namespace)) >= 2:
+            return host, namespace
+    except ValueError:
+        pass
+    return None
 
 
 def sanitize(group_path: str) -> list[str]:
@@ -79,9 +235,8 @@ def _under(dest_norm: str, path: str) -> bool:
 # comparison (basename(dest) == a component of the group path), which fires on
 # an accidental NAME COLLISION as readily as on a real structural duplication.
 #
-# On a real configuration the destination's last component is usually the
-# instance's `folder` setting (instances.build_cfg: master_dir = base_dir +
-# folder). A GitLab top-level group that happens to share that folder's name —
+# In the legacy layout the destination's last component could be the
+# instance's `folder` setting. A GitLab group sharing that folder's name —
 # folder "globex" and group "globex" both existing — then made every repo
 # in that namespace lose its leading namespace component, splitting one tree
 # into two incompatible shapes (half-nested vs double-nested).

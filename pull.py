@@ -9,6 +9,7 @@ import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import coverage as cov
 import error_catalog
 import git as _git
 import paths
@@ -399,7 +400,8 @@ def _print_summary(stats: dict, attention: list[dict], base: str,
 
 
 def sync_many(repos: list[str], base: str, workers: int = DEFAULT_WORKERS,
-              show_all: bool = True) -> tuple[dict, list]:
+              show_all: bool = True, *, host_root: str | None = None,
+              instance_url: str | None = None) -> tuple[dict, list]:
     """
     Sync several repos in parallel.
     Returns (stats, attention).
@@ -408,7 +410,9 @@ def sync_many(repos: list[str], base: str, workers: int = DEFAULT_WORKERS,
     stats, attention, done = {}, SyncAttention(), 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(sync_repo, p): p for p in repos}
+        options = {} if host_root is None else {"host_root": host_root,
+                                                   "instance_url": instance_url}
+        futures = {pool.submit(sync_repo, p, **options): p for p in repos}
 
         for fut in as_completed(futures):
             path = futures[fut]
@@ -437,9 +441,16 @@ def sync_many(repos: list[str], base: str, workers: int = DEFAULT_WORKERS,
     return stats, attention
 
 
-def cmd_pull(cfg: dict, group_path: str, dest: str = ".",
+def cmd_pull(cfg: dict, group_path: str, dest: str | None = None,
              workers: int = DEFAULT_WORKERS, quiet: bool = False):
-    local_path = _resolve_local_path(group_path, dest, cfg.get("folder"))
+    options = {}
+    if "layout_host" in cfg:
+        root = cov.managed_destination(cfg, dest)
+        local_path = paths.managed_path(root, group_path)
+        options["host_root"] = root
+        options["instance_url"] = cfg["url"]
+    else:
+        local_path = _resolve_local_path(group_path, dest or ".", cfg.get("folder"))
 
     print_section(f"Sync: {group_path}")
     print_info(f"Folder: {os.path.abspath(local_path)}")
@@ -458,5 +469,5 @@ def cmd_pull(cfg: dict, group_path: str, dest: str = ".",
     print_info(f"{len(repos)} repos · {w} in parallel\n")
 
     stats, attention = sync_many(repos, local_path, workers=w,
-                                 show_all=not quiet)
+                                 show_all=not quiet, **options)
     _print_summary(stats, attention, local_path)

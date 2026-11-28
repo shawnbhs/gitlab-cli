@@ -22,6 +22,20 @@ write the same thing out by absolute path:
 `python -m gitlab_mcp.cli <command>`, run from the checkout, is the same
 program. Its usage line calls it `gitlab-report`.
 
+Managed local clones live at `MasterGroups/<host>/<full/namespace/path/repo>`.
+The host is derived from the instance URL, not the legacy `folder` setting;
+instances sharing a host with different HTTP(S) scheme or port are refused.
+Clone, retry and sync use only the selected instance's verified source:
+HTTP(S) scheme, host and port must match its URL; SSH sources match host
+and exact namespace. Old-layout checkouts are not moved automatically.
+`scripts/preview_host_layout.py` only previews a trusted offline inventory;
+it makes no filesystem changes.
+
+`gitlab-cli remote-count <namespace/project> [...]` counts other configured
+remote names for each verified managed checkout under the active instance.
+It reads local Git metadata only: no API, fetch or setup; unresolved paths
+are reported rather than guessed.
+
 The command and flag lists below come from walking the parser that
 `gitlab_mcp.cli.build_parser()` returns. That walk was done on 2026-10-11 at
 05:50:59 and again at 06:02:26 (UTC-06:00).
@@ -267,3 +281,7 @@ gitlab-cli report progress example-group/project-a --since 30d --format md --out
 * **`sync` and `clone-missing` do not reimplement git.** They reuse
   gitlab-cli's own `pull` and `clone` code. Their stdout is captured and
   returned as `output`. Both act only inside the instance's `master_dir`.
+  In managed host layout, preview pins the full local selection or verified
+  missing-project inventory with `scope_sha256`, not just the capped display.
+  The action recomputes it and refuses changed scope. An incomplete GitLab
+  project page or inventory fails closed instead of authorizing a partial clone.

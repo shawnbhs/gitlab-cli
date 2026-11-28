@@ -10,6 +10,9 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from hashlib import sha256
+from tempfile import NamedTemporaryFile
+from urllib.parse import urlsplit
 from urllib.parse import quote as _urlquote
 import paths
 import errors as _errors_mod
@@ -1227,7 +1230,10 @@ def _group_slug(group_path: str) -> str:
     return _GROUP_SEP.join(parts)
 
 
-def _error_log_path(dest: str, group_path: str) -> str:
+def _error_log_path(dest: str, group_path: str, *, managed: bool = False) -> str:
+    if managed:
+        key = sha256(group_path.encode()).hexdigest()
+        return os.path.join(dest, f".managed-{key}_errors.json")
     return os.path.join(dest, f".{_group_slug(group_path)}_errors.json")
 
 
@@ -1310,7 +1316,9 @@ def _save_errors(dest: str, group_path: str, errors: list):
     print(f"\n{YELLOW}⚠  {len(errors)} errors saved to:{RESET} {DIM}{path}{RESET}")
 
 
-def load_errors(dest: str, group_path: str) -> list:
+def load_errors(dest: str, group_path: str, *, managed: bool = False) -> list:
+    if managed:
+        return _managed_read_log(dest, group_path).get("errors", [])
     data = _read_log(_error_log_path(dest, group_path))
     if data is not None:
         return data.get("errors", []) or []
@@ -1319,6 +1327,362 @@ def load_errors(dest: str, group_path: str) -> list:
     if ldata is not None:
         return ldata.get("errors", []) or []
     return []
+
+
+# ─── Managed clone ────────────────────────────────────────────────────────────
+
+
+def _managed_group_root(cfg, dest, group_path):
+    authority = paths.gitlab_authority(cfg.get("url"))
+    root = cfg.get("master_dir") if dest == "." else dest
+    if (not root or not os.path.isabs(root) or authority[1] != cfg["layout_host"]
+            or root != paths.managed_root(os.path.dirname(root), cfg["url"])):
+        raise ValueError("Invalid managed GitLab destination.")
+    paths.managed_path(root, group_path)
+    managed = cfg.get("master_dir")
+    if root != managed and os.path.commonpath((root, managed)) == managed:
+        raise ValueError("Explicit clone root cannot nest inside the configured host root.")
+    return root, authority
+
+
+def _managed_read_log(root, group_path):
+    paths.managed_path(root, group_path)
+    log = _error_log_path(root, group_path, managed=True)
+    if not os.path.lexists(log):
+        return {}
+    if not os.path.isfile(log) or os.path.islink(log):
+        raise ValueError("Managed retry log is not a regular file.")
+    data = _read_log(log)
+    if (not data or data.get("group") != group_path
+            or not isinstance(data.get("errors"), list)):
+        raise ValueError("Managed retry log is unreadable or outside this scope.")
+    return data
+
+
+def _managed_write_log(path, data):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    # A random, exclusively created 0600 temp file cannot follow a pre-existing link.
+    with NamedTemporaryFile(dir=directory, mode="w", encoding="utf-8",
+                            delete=False) as stream:
+        temp = stream.name
+        try:
+            json.dump(_errors_mod.redact_obj(data), stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(temp)
+            raise
+    try:
+        os.replace(temp, path)
+    finally:
+        if os.path.lexists(temp):
+            os.unlink(temp)
+
+
+def _managed_clone_url(url, authority, namespace):
+    scheme = url.partition(":")[0] if isinstance(url, str) else ""
+    if scheme not in ("http", "https") or paths.remote_identity(url) != (authority[1], namespace):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return paths.gitlab_authority(f"{scheme}://{parsed.netloc}") == authority
+    except paths.UnsafePath:
+        return False
+
+
+def _project_id(project):
+    number = project.get("id") if isinstance(project, dict) else None
+    return number if type(number) is int and number > 0 else None
+
+
+def _managed_project(root, authority, group_path, project):
+    namespace = project.get("path_with_namespace")
+    if not isinstance(namespace, str) or namespace.rpartition("/")[0] != group_path:
+        raise ValueError("Project is outside the selected group.")
+    if _project_id(project) is None:
+        raise ValueError("Project ID is unavailable.")
+    target = paths.managed_path(root, namespace)
+    url = project.get("http_url_to_repo")
+    if not _managed_clone_url(url, authority, namespace):
+        raise ValueError("Clone URL does not match the GitLab authority and project namespace.")
+    return target, url
+
+
+def _managed_projects(cfg, root, group_path, group):
+    """Complete direct-owned tree, with ancestry proven at every API boundary."""
+    if not isinstance(group, dict) or group.get("full_path") != group_path:
+        raise ValueError("Requested GitLab group could not be verified.")
+    groups = [(group_path, group)]
+    seen_groups = set()
+    projects = []
+    while groups:
+        scope, group = groups.pop()
+        number = _project_id(group)
+        if number is None or number in seen_groups:
+            raise ValueError("GitLab group listing has missing or repeated IDs.")
+        seen_groups.add(number)
+        if is_pending_deletion(group):
+            continue
+        children = get_subgroups(cfg["url"], cfg["headers"], number)
+        direct = get_projects(cfg["url"], cfg["headers"], number)
+        if not _complete(children) or not _complete(direct):
+            raise ValueError("GitLab group listing is incomplete.")
+        for child in children:
+            name = child.get("full_path")
+            if not isinstance(name, str) or name.rpartition("/")[0] != scope:
+                raise ValueError("GitLab returned a subgroup outside the selected scope.")
+            paths.managed_path(root, name)
+            groups.append((name, child))
+        projects.extend((scope, project) for project in direct)
+    return projects
+
+
+def _inventory_repos(root):
+    """Local-only exhaustive walk. Unreadable or linked trees are not absence."""
+    def unreadable(_error):
+        raise ValueError("Local clone inventory is unreadable.")
+
+    if os.path.islink(root):
+        raise ValueError("Local clone inventory contains a linked directory.")
+    if not os.path.isdir(root):
+        if os.path.lexists(root):
+            raise ValueError("Local clone inventory is not a directory.")
+        return
+    for directory, dirs, files in os.walk(root, onerror=unreadable):
+        if ".git" in dirs or ".git" in files:
+            yield directory
+        if ".git" in dirs:
+            dirs.remove(".git")
+        # os.walk does not descend links. Check namespace links separately:
+        # a linked directory outside a checkout hides an unverified tree.
+        if any(os.path.islink(os.path.join(directory, name)) for name in dirs):
+            ancestor = directory
+            while ancestor != root and not os.path.lexists(os.path.join(ancestor, ".git")):
+                ancestor = os.path.dirname(ancestor)
+            if not os.path.lexists(os.path.join(ancestor, ".git")):
+                raise ValueError("Local clone inventory contains a linked namespace.")
+
+
+def _managed_inventory(cfg, root, authority):
+    """Read effective fetch remotes including legacy locations, never transport."""
+    base = cfg["base_dir"]
+    if paths.managed_root(base, cfg["url"]) != cfg["master_dir"]:
+        raise ValueError("Configured clone inventory root does not match the GitLab instance.")
+    roots = [base]
+    if os.path.commonpath((base, root)) != base:
+        roots.append(root)
+    inventory = {}
+    unresolved = False
+    for scan_root in roots:
+        for repo in _inventory_repos(scan_root):
+            rc, out, _ = gitlib._managed_read(repo, "remote")
+            names = out.splitlines() if rc == 0 else []
+            if not names:
+                unresolved = True
+            for name in names:
+                if not gitlib.is_safe_remote_name(name):
+                    unresolved = True
+                    continue
+                rc, out, _ = gitlib._managed_read(repo, "remote", "get-url", "--all", "--", name)
+                url = out.removesuffix("\n")
+                identity = paths.remote_identity(url) if rc == 0 else None
+                if identity is None:
+                    unresolved = True
+                elif identity[0] == authority[1]:
+                    if url.startswith(("https:", "http:")) and not _managed_clone_url(url, authority, identity[1]):
+                        unresolved = True
+                    else:
+                        inventory.setdefault(identity[1], set()).add(repo)
+    return inventory, unresolved
+
+
+def _managed_copy_ids(cfg, inventory, authority, known):
+    """Resolve orphan origins with current GitLab project IDs, never a move."""
+    ids = {}
+    unresolved = False
+    for namespace in inventory:
+        number = known.get(namespace)
+        if number is None:
+            try:
+                project = gitlab_api.get_project(cfg["url"], cfg["headers"], namespace)
+            except gitlab_api.ApiError:
+                project = None
+            if isinstance(project, dict) and _managed_clone_url(project.get("http_url_to_repo"), authority,
+                                                               project.get("path_with_namespace")):
+                number = _project_id(project)
+        if number is None:
+            unresolved = True
+        else:
+            ids.setdefault(number, []).extend(inventory[namespace])
+    return ids, unresolved
+
+
+def _managed_row(root, authority, group_path, cfg, project, copies, unresolved, previous):
+    """Return a retryable/blocker row, or None for verified presence or a completed clone."""
+    number = _project_id(project)
+    namespace = project.get("path_with_namespace")
+    row = {"project": str(number) if number else group_path, "id": number}
+    incomplete = previous and previous.get("reason")
+    if incomplete not in (REASON_LFS, "shallow"):
+        incomplete = None
+    try:
+        target, url = _managed_project(root, authority, group_path, project)
+        row.update(project=namespace, namespace=namespace, path=target)
+        # Do not clone a project into another checkout's working tree.
+        parent = os.path.dirname(target)
+        while True:
+            if os.path.lexists(os.path.join(parent, ".git")):
+                raise ValueError("Destination is inside another Git working tree.")
+            if parent == root:
+                break
+            parent = os.path.dirname(parent)
+        if os.path.isdir(target) and os.listdir(target):
+            try:
+                if os.path.islink(os.path.join(target, ".git")):
+                    raise ValueError
+                remote, _ = gitlib.managed_source(target, root)
+                rc, out, _ = gitlib._managed_read(target, "remote", "get-url", "--all", "--", remote)
+                effective = out.removesuffix("\n")
+                if (rc != 0 or paths.remote_identity(effective) != (authority[1], namespace)
+                        or (effective.startswith(("http:", "https:")) and not
+                            _managed_clone_url(effective, authority, namespace))):
+                    raise ValueError
+            except ValueError:
+                raise ValueError("Occupied destination does not match the exact GitLab project.") from None
+            rc, shallow, _ = gitlib._managed_read(target, "rev-parse", "--is-shallow-repository")
+            if rc or shallow.strip() not in ("true", "false"):
+                raise ValueError("Could not determine clone completeness.")
+            if incomplete or shallow.strip() == "true":
+                return dict(row, reason=incomplete or "shallow",
+                            detail="Repository is present but incomplete; managed repair was deferred.")
+            print_info(f"{namespace}: already present at the canonical destination")
+            return None
+        if copies:
+            raise ValueError("Project has a clone elsewhere or under an old namespace; migration required.")
+        if unresolved:
+            raise ValueError("Unresolved local clone inventory; run the migration preview before cloning.")
+        transfer = getattr(gitlib, "clone_repo_managed", None)
+        if transfer is None:
+            raise ValueError("Verified managed Git transport is unavailable; clone deferred.")
+        # Recheck just before handing off to Git. Not a lock against other writers.
+        if paths.managed_path(root, namespace) != target or (os.path.lexists(target) and os.listdir(target)):
+            raise ValueError("Clone destination changed; retry after reviewing it.")
+        result = transfer(cfg.get("token") or "", url, target,
+                          instance_url=cfg["url"], host_root=root)
+        status = result.get("status")
+        if status == "ok":
+            _bump("cloned")
+            print_info(f"{namespace}: cloned into the canonical destination")
+            return None
+        if status in (S_LFS, getattr(gitlib, "S_SHALLOW", "shallow")):
+            return dict(row, reason=status, detail="Repository cloned but incomplete; kept untouched.")
+        return dict(row, code=_err_code(status=status), detail="Managed clone failed.")
+    except (OSError, ValueError) as exc:
+        # OSError can include untrusted local path text, so don't print it.
+        return dict(row, reason=incomplete or "managed_blocked", detail=str(exc) if isinstance(exc, ValueError)
+                    else "Could not inspect the managed destination.")
+
+
+def _run_managed_clone(cfg, group_path, dest, *, retry=False):
+    try:
+        root, authority = _managed_group_root(cfg, dest, group_path)
+        log = _managed_read_log(root, group_path)
+        if log and log.get("authority") != list(authority):
+            raise ValueError("Managed retry log belongs to a different GitLab authority.")
+    except (KeyError, OSError, ValueError, TypeError) as exc:
+        print_error(f"Managed clone refused: {str(exc) if isinstance(exc, ValueError) else type(exc).__name__}")
+        return
+
+    previous = log.get("errors", [])
+    if retry and not previous:
+        print_info("No verified managed retry rows. Review legacy failures in the migration preview.")
+        return
+
+    rows = []
+    planned = []
+    try:
+        group = get_group(cfg["url"], cfg["headers"], group_path)
+        if not isinstance(group, dict) or group.get("full_path") != group_path:
+            raise ValueError("Requested GitLab group could not be verified.")
+        if retry:
+            for row in previous:
+                number = _project_id(row) if isinstance(row, dict) else None
+                namespace = row.get("namespace") if isinstance(row, dict) else None
+                try:
+                    if number is None or not isinstance(namespace, str) or not namespace.startswith(group_path + "/"):
+                        raise paths.UnsafePath("Retry project is outside the selected scope.")
+                    # Validate the saved name without inspecting the intended checkout yet.
+                    paths._namespace_parts(namespace)
+                except paths.UnsafePath:
+                    rows.append(dict(project=group_path, detail="Retry row has no verified identity; left unresolved."))
+                    continue
+                try:
+                    project = gitlab_api.get_project(cfg["url"], cfg["headers"], number)
+                except gitlab_api.ApiError:
+                    project = None
+                if (not project or _project_id(project) != number
+                        or project.get("path_with_namespace") != namespace):
+                    rows.append(dict(project=group_path, id=number, namespace=namespace,
+                                     reason=row.get("reason"), detail="Retry project unavailable or renamed; deferred."))
+                    continue
+                planned.append((namespace.rpartition("/")[0], project, row))
+        else:
+            old = {_project_id(row): row for row in previous if _project_id(row) is not None}
+            for scope, project in _managed_projects(cfg, root, group_path, group):
+                prior = old.get(_project_id(project))
+                if prior and prior.get("namespace") != project.get("path_with_namespace"):
+                    print_warn(f"Project ID {_project_id(project)}: namespace changed; clone deferred.")
+                    continue  # Keep the existing retry row for review.
+                planned.append((scope, project, prior))
+        known = {}
+        ids = set()
+        for scope, project, _ in planned:
+            number = _project_id(project)
+            namespace = project.get("path_with_namespace")
+            if number is None or not isinstance(namespace, str):
+                continue
+            if number in ids or namespace in known:
+                raise ValueError("GitLab project listing has repeated identities.")
+            if namespace.rpartition("/")[0] == scope and _managed_clone_url(
+                    project.get("http_url_to_repo"), authority, namespace):
+                known[namespace] = number
+                ids.add(number)
+        inventory, unreadable = _managed_inventory(cfg, root, authority) if known else ({}, False)
+        copy_ids, unresolved = _managed_copy_ids(cfg, inventory, authority, known)
+        for scope, project, prior in planned:
+            if is_pending_deletion(group) or is_pending_deletion(project):
+                print_info("Project scheduled for deletion; no clone attempted.")
+                continue
+            namespace = project.get("path_with_namespace")
+            if not isinstance(namespace, str) or namespace.rpartition("/")[0] != scope:
+                rows.append(dict(project=scope, detail="Project is outside its listed namespace."))
+                continue
+            result = _managed_row(root, authority, scope, cfg, project,
+                                  inventory.get(namespace) or copy_ids.get(_project_id(project)),
+                                  unreadable or unresolved, prior)
+            if result:
+                rows.append(result)
+        if not retry:
+            # A changed/disappeared project must not erase its outstanding retry row.
+            rows.extend(row for row in previous if isinstance(row, dict) and _project_id(row)
+                        and row.get("namespace") not in known)
+    except (gitlab_api.ApiError, ValueError, OSError, AttributeError, TypeError) as exc:
+        print_error(f"Managed clone deferred: {str(exc) if isinstance(exc, ValueError) else type(exc).__name__}")
+        rows = previous or [dict(project=group_path, detail="Clone plan could not be verified.")]
+
+    path = _error_log_path(root, group_path, managed=True)
+    try:
+        paths.managed_path(root, group_path)
+        if rows:
+            _managed_write_log(path, {"group": group_path, "authority": list(authority), "errors": rows})
+        elif log:
+            os.unlink(path)
+    except (OSError, ValueError):
+        print_error("Could not update the managed retry log.")
+    for row in rows:
+        if isinstance(row, dict):
+            print_warn(f"Clone blocked or incomplete: {_summary_of(row.get('detail') or '')}")
 
 
 # ─── Recursive clone ───────────────────────────────────────────────────────────
@@ -1684,6 +2048,8 @@ def _print_invalid_notice(errors: list):
 
 
 def cmd_clone(cfg: dict, group_path: str, dest: str = "."):
+    if "layout_host" in cfg:
+        return _run_managed_clone(cfg, group_path, dest)
     global _current_dest, _current_group
     _current_dest  = dest
     _current_group = group_path
@@ -1858,6 +2224,9 @@ def reconcile_renames(cfg: dict, group_path: str, dest: str,
     It NEVER clones, never deletes a non-empty directory and never raises on
     an API failure (one warning line, then []).
     """
+    if "layout_host" in cfg:
+        print_warn("Managed rename repair deferred; use migration preview.")
+        return []
     rows = []
     try:
         root = os.path.abspath(dest or ".")
@@ -2185,6 +2554,8 @@ def prune_leftovers(cfg: dict, group_path: str, dest: str,
     raises. Returns [{'path': rel-to-dest, 'kind': 'empty_dir' |
     'empty_dead_clone', 'reason': str}].
     """
+    if "layout_host" in cfg:
+        return []  # Managed actions never remove old clone paths.
     rows = []
     try:
         base = os.path.abspath(dest or ".")
@@ -2275,6 +2646,8 @@ def prune_leftovers(cfg: dict, group_path: str, dest: str,
 
 def cmd_retry_failed(cfg: dict, group_path: str, dest: str = "."):
     """Retry only the previously failed projects."""
+    if "layout_host" in cfg:
+        return _run_managed_clone(cfg, group_path, dest, retry=True)
     errors = load_errors(dest, group_path)
 
     if not errors:

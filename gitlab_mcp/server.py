@@ -349,6 +349,12 @@ def _description_hash(preview: dict) -> dict:
     return {"description_sha256": digest} if digest else {}
 
 
+def _local_scope(preview: dict) -> dict:
+    """Bind the whole managed scope, not the capped list shown in the preview."""
+    digest = preview.get("scope_sha256")
+    return {"scope_sha256": digest} if digest else {}
+
+
 def _namespace_id(key: str) -> Callable[[dict], dict]:
     """Pin a create to the group id the human previewed, not its path."""
     return lambda preview: {key: preview[key]} if preview.get(key) else {}
@@ -704,7 +710,7 @@ def _tool_sync_local(group: str | None = None, project: str | None = None,
     nothing is ever merged, rebased or reset.
     """
     return _write("sync_local", {"group": group, "project": project},
-                  instance, confirm_token)
+                  instance, confirm_token, pin=_local_scope)
 
 
 @_write_tool("gitlab_clone_missing")
@@ -717,7 +723,7 @@ def _tool_clone_missing(group: str, instance: str | None = None,
     cloned and where, get the user's explicit approval, then call again with
     the token. Already-cloned projects are skipped, never clobbered.
     """
-    return _write("clone_missing", {"group": group}, instance, confirm_token)
+    return _write("clone_missing", {"group": group}, instance, confirm_token, pin=_local_scope)
 
 
 @_write_tool("gitlab_mr_comment")

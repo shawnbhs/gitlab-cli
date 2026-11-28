@@ -1,10 +1,7 @@
 # test_w6_8_folder_idempotence.py — W6-8: the folder must be applied exactly once.
 #
-# build_cfg publishes  master_dir = anchor(base) + folder.  Before this fix that
-# output could be fed back in as an instance record and the folder was appended
-# a second time, giving MasterGroups/acme/acme — one level too
-# deep for every Hub path, which would make the tool blind to all existing Hub
-# clones and re-clone them into a second tree.
+# Built configs qualify the base with a hostname once. Persisted legacy
+# folders remain migration hints and never reshape the configured base.
 #
 # The real ~/.gitlab-cli/instances.json is NEVER touched by these tests: every
 # config-writing test points instances.INSTANCES_FILE at a tmp sandbox.
@@ -73,27 +70,26 @@ class SandboxConfig:
         return False
 
 
-class TestFolderAppliedOnce(unittest.TestCase):
+class TestHostAppliedOnce(unittest.TestCase):
 
-    def test_hub_folder_applied_exactly_once(self):
+    def test_hub_host_applied_exactly_once(self):
         cfg = _cfg(HUB)
         base = paths.anchor("MasterGroups")
         self.assertEqual(cfg["base_dir"], base)
-        self.assertEqual(cfg["master_dir"], os.path.join(base, "acme"))
-        self.assertNotIn(os.path.join("acme", "acme"),
-                         cfg["master_dir"])
+        self.assertEqual(cfg["master_dir"], os.path.join(base, "hub.example.com"))
+        self.assertEqual(cfg["folder"], "acme")
 
-    def test_globex_without_folder_key_stays_at_base(self):
+    def test_globex_without_folder_key_uses_host(self):
         self.assertNotIn("folder", GLOBEX)
         cfg = _cfg(GLOBEX)
         base = paths.anchor("MasterGroups")
         self.assertEqual(cfg["folder"], "")
-        self.assertEqual(cfg["master_dir"], base)
+        self.assertEqual(cfg["master_dir"], os.path.join(base, "git.example.net"))
         self.assertEqual(cfg["base_dir"], base)
 
     def test_explicit_none_folder_behaves_like_missing_key(self):
         inst = dict(GLOBEX, folder=None)
-        self.assertEqual(_cfg(inst)["master_dir"], paths.anchor("MasterGroups"))
+        self.assertEqual(_cfg(inst)["master_dir"], _cfg(GLOBEX)["master_dir"])
 
 
 class TestIdempotence(unittest.TestCase):
@@ -112,23 +108,13 @@ class TestIdempotence(unittest.TestCase):
             cfg = instances.build_cfg(cfg, allow_generic=True)
             self.assertEqual(cfg["master_dir"], want)
 
-    def test_already_doubled_master_dir_is_repaired(self):
-        """A config damaged by an earlier build is resolved back to one copy."""
-        damaged = dict(HUB, master_dir=os.path.join("MasterGroups",
-                                                    "acme"))
-        self.assertEqual(_cfg(damaged)["master_dir"], _cfg(HUB)["master_dir"])
-
-    def test_triply_doubled_master_dir_is_repaired(self):
-        damaged = dict(HUB, master_dir=os.path.join(
-            "MasterGroups", "acme", "acme", "acme"))
-        self.assertEqual(_cfg(damaged)["master_dir"], _cfg(HUB)["master_dir"])
-
-    def test_master_dir_equal_to_folder_alone_is_left_alone(self):
-        """No parent left to fall back to — do not strip to nothing."""
-        inst = dict(HUB, master_dir="acme")
-        self.assertEqual(_cfg(inst)["master_dir"],
-                         os.path.join(paths.anchor("acme"),
-                                      "acme"))
+    def test_base_ending_in_legacy_folder_is_not_rewritten(self):
+        for base in ("acme", "MasterGroups/acme", "MasterGroups/acme/acme/acme"):
+            with self.subTest(base=base):
+                cfg = _cfg(dict(HUB, master_dir=base))
+                self.assertEqual(cfg["base_dir"], paths.anchor(base))
+                self.assertEqual(cfg["master_dir"],
+                                 os.path.join(paths.anchor(base), "hub.example.com"))
 
 
 class TestSaveCannotAccumulate(unittest.TestCase):
@@ -177,13 +163,13 @@ class TestSaveCannotAccumulate(unittest.TestCase):
             self.assertEqual(insts["globex"]["master_dir"], "MasterGroups")
             self.assertEqual(sb.read()["active"], "globex")
 
-    def test_save_repairs_an_already_damaged_on_disk_config(self):
+    def test_save_preserves_literal_base_ending_in_legacy_folder(self):
         with SandboxConfig() as sb:
             sb.write({"instances": [dict(HUB, master_dir="MasterGroups/acme")],
                       "active": "Hub"})
             instances._save(instances._load())
             self.assertEqual(sb.read()["instances"][0]["master_dir"],
-                             "MasterGroups")
+                             "MasterGroups/acme")
 
     def test_save_leaves_a_folderless_instance_untouched(self):
         with SandboxConfig() as sb:

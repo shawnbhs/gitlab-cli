@@ -654,10 +654,18 @@ def _quick_actions(args: argparse.Namespace) -> dict:
             if getattr(args, "allow_quick_actions", False) else {})
 
 
+def _local_scope(preview: dict) -> dict:
+    """Bind the whole managed scope, not the capped list shown in the preview."""
+    digest = preview.get("scope_sha256")
+    return {"scope_sha256": digest} if digest else {}
+
+
 #: command -> function mapping the preview to keyword arguments only the CLI
 #: (never the user's flags) supplies to ``do_<action>``: the state the human
 #: just saw, so a change made after they looked is rejected.
 _PINNED_FROM_PREVIEW: dict[str, Callable[[dict], dict]] = {
+    "sync": _local_scope,
+    "clone-missing": _local_scope,
     "mr-merge": lambda p: {"sha": p.get("sha")},
     "mr-approve": lambda p: {"sha": p.get("sha")},
     "mr-create": lambda p: ({"description_sha256": p["description_sha256"]}

@@ -168,21 +168,24 @@ Press `b` in the menu to switch between them. Each instance keeps:
 
 ### Directory layout
 
-With more than one instance, give each its own subdirectory so
-same-named groups do not collide:
+Managed clones use `MasterGroups/<host>/<full/namespace/path/repo>`:
 
 ```
 MasterGroups/
-├── work/              ← internal GitLab
-│   ├── platform/
-│   └── infra/
-└── personal/          ← another GitLab
-    ├── projects/
-    └── docs/
+└── gitlab.example.com/
+    └── platform/
+        └── services/
+            └── app/
 ```
 
-The wizard asks for this (`folder`). Leave it empty and groups are
-cloned directly into the root directory.
+The host comes from the configured instance URL; every group and subgroup
+remains in the project's full namespace. The legacy `folder` setting is
+metadata, not a destination selector. Two configured instances on the same
+hostname but different HTTP(S) scheme or port are refused, since they would
+share a host directory. Existing old-layout trees are **not moved** by clone
+or sync. `scripts/preview_host_layout.py` is read-only and accepts a complete,
+trusted offline inventory and its separately obtained SHA-256; it authorizes
+no move. Inspect old trees before any manual migration.
 
 Two groups in different namespaces may share a project *name*
 (`atlas/feed-ms` and `beacon/feed-ms` are different projects). Identity
@@ -218,6 +221,7 @@ gitlab-cli clone   <group> [dir]    # clone an entire group tree
 gitlab-cli sync    <group> [dir]    # smart sync
 gitlab-cli log     <group> [since] [author] [dir]
 gitlab-cli remotes [dir] [--fix]    # audit remotes (active instance only)
+gitlab-cli remote-count <namespace/project> [...]  # count other remotes offline
 gitlab-cli harden-perms [--dry-run] [root ...]
 gitlab-cli report create-group   NAME [--path] [--parent] [--visibility]
 gitlab-cli report create-project NAME [--namespace] [--path] [--visibility] [--description] [--readme]
@@ -654,10 +658,12 @@ negative answer.
 
 Rather than running a plain `git pull`, for each repository it:
 
-1. runs `fetch --all --prune --tags`
-2. measures how far ahead or behind **every** remote is
-3. picks the furthest remote that can fast-forward
-4. runs `merge --ff-only`, so it never creates an unwanted merge commit
+1. verifies the checkout's host and full namespace against its managed path
+2. selects the upstream remote (or one unambiguous matching remote) and
+   checks its effective URL against the configured instance: HTTP(S) scheme,
+   host and port, or SSH host and full namespace
+3. fetches only that verified source and compares its branch to local HEAD
+4. runs `merge --ff-only` only when safe; it never fetches other remotes
 
 The current branch is whatever the repository is actually on — nothing
 assumes `main` or `master`.
@@ -885,10 +891,10 @@ group access. `doctor` tells you which one it is.
 **"Clone All" says done but projects are missing**
 Run `gitlab-cli doctor` and read the **coverage** line: it prints
 `n/N projects on disk` per namespace. If a namespace is `◐` or `❌`,
-`ca` in the menu will pick it up. If `doctor` also reports a
-`config matches the disk` problem, your `folder` setting and your
-existing tree disagree — new clones are landing next to the old ones
-rather than in them.
+`ca` in the menu will pick it up. Older clones outside the canonical
+`MasterGroups/<host>/<full/namespace/path/repo>` layout are not moved
+automatically. Use the read-only host-layout preview with trusted inventory
+to inspect them before any manual migration.
 
 **A project keeps being skipped**
 Its directory exists but is not a valid repository (an interrupted

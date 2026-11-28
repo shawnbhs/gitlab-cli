@@ -15,6 +15,8 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
+import paths
+
 GIT_BIN = shutil.which("git") or "git"
 _SCAN_WORKERS = 16
 
@@ -190,6 +192,43 @@ def scan(root: str) -> dict:
     return out
 
 
+def managed_destination(cfg: dict, dest: str | None = None) -> str:
+    """Validate a destination already qualified by its GitLab host."""
+    root = cfg["master_dir"] if dest is None else dest
+    if (not os.path.isabs(root) or os.path.basename(root) != cfg["layout_host"]
+            or root != paths.managed_root(os.path.dirname(root), cfg["url"])):
+        raise paths.UnsafePath("Invalid managed GitLab destination.")
+    return root
+
+
+def scan_managed(host_root: str, *, subtree: str | None = None) -> tuple[dict, list[str]]:
+    """Exact, source-verified project index and unresolved working trees."""
+    from git import managed_source
+
+    def identify(repo):
+        try:
+            managed_source(repo, host_root)
+            return os.path.basename(host_root), paths.managed_namespace(host_root, repo)
+        except (OSError, ValueError):
+            return None
+
+    repos = find_repos(subtree if subtree is not None else host_root)
+    index, unresolved = {}, []
+    with ThreadPoolExecutor(max_workers=max(1, min(_SCAN_WORKERS, len(repos)))) as pool:
+        for repo, identity in zip(repos, pool.map(identify, repos), strict=True):
+            if identity is None:
+                unresolved.append(repo)
+            else:
+                index[identity] = repo
+    return index, unresolved
+
+
+def project_key(cfg: dict, namespace: str) -> tuple[str, str]:
+    if "layout_host" in cfg:
+        return cfg["layout_host"], namespace
+    return host_of(cfg["url"]), namespace.lower()
+
+
 def host_of(gitlab_url: str) -> str:
     return gitlab_url.split("://", 1)[-1].split("/")[0].split(":")[0].lower()
 
@@ -274,8 +313,7 @@ def group_coverage_counts(cfg: dict, group: dict, index: dict,
     """
     projects = remote_projects(cfg, group) if projects is None else projects
     live, pending = split_pending(projects)
-    host = host_of(cfg["url"])
-    want = {(host, p["path_with_namespace"].lower()) for p in live}
+    want = {project_key(cfg, p["path_with_namespace"]) for p in live}
     cloned = len(want & set(index))
     return {"cloned": cloned, "total": len(want),
             "missing": len(want) - cloned, "pending_deletion": pending}
@@ -301,9 +339,7 @@ def missing_projects(cfg: dict, group: dict, index: dict,
     """
     projects = remote_projects(cfg, group) if projects is None else projects
     live, _pending = split_pending(projects)
-    host = host_of(cfg["url"])
-    return [p for p in live
-            if (host, p["path_with_namespace"].lower()) not in index]
+    return [p for p in live if project_key(cfg, p["path_with_namespace"]) not in index]
 
 
 # ─── Coverage accounting — ONE fraction, ONE place ────────────────────────────
@@ -387,7 +423,7 @@ def project_namespace_kind(project: dict) -> str:
     return kind if kind in ("group", "user") else "unknown"
 
 
-def coverage_counts(projects, present_keys, host: str) -> dict:
+def coverage_counts(projects, present_keys, host: str, *, exact: bool = False) -> dict:
     """The single accounting of an instance's coverage.
 
     projects      — the FLAT project list (every namespace), as doctor fetches.
@@ -410,7 +446,8 @@ def coverage_counts(projects, present_keys, host: str) -> dict:
     caller printing a bare number would be back to the original defect.
     """
     host = (host or "").lower()
-    have = {(str(h).lower(), str(p).lower()) for h, p in (present_keys or ())}
+    have = (set(present_keys or ()) if exact else
+            {(str(h).lower(), str(p).lower()) for h, p in (present_keys or ())})
 
     c = {"group_total": 0, "group_present": 0,
          "user_total": 0, "user_present": 0,
@@ -418,7 +455,9 @@ def coverage_counts(projects, present_keys, host: str) -> dict:
          "pending_deletion": 0}
 
     for p in projects or ():
-        pwn = ((p or {}).get("path_with_namespace") or "").strip("/").lower()
+        pwn = (p or {}).get("path_with_namespace") or ""
+        if not exact:
+            pwn = pwn.strip("/").lower()
         if not pwn:
             continue
         if is_pending_deletion(p):
@@ -577,7 +616,7 @@ def _request_accepts_record(fn) -> bool:
 
 
 def local_orphans(index: dict, projects, host: str,
-                  prefix: str = None) -> list[dict]:
+                  prefix: str = None, *, exact: bool = False) -> list[dict]:
     """Every clone under `index` for `host` that no listed project claims.
 
     PURELY LOCAL. No network call is made and no classification is guessed:
@@ -593,13 +632,17 @@ def local_orphans(index: dict, projects, host: str,
     host = (host or "").lower()
     live = set()
     for p in projects or ():
-        pwn = ((p or {}).get("path_with_namespace") or "").strip("/").lower()
+        pwn = (p or {}).get("path_with_namespace") or ""
+        if not exact:
+            pwn = pwn.strip("/").lower()
         # D5: a project pending deletion is excluded from coverage, so a clone
         # of it must surface here or it would be counted nowhere at all.
         if pwn and not is_pending_deletion(p or {}):
             live.add(pwn)
 
-    pre = (prefix or "").strip("/").lower()
+    pre = prefix or ""
+    if not exact:
+        pre = pre.strip("/").lower()
     out = []
     for (h, path), local_dir in (index or {}).items():
         if h != host or path in live:
@@ -733,7 +776,8 @@ def instance_orphans(cfg: dict, index: dict, projects,
     top-level group was dissolved server-side, because there is no group left
     to iterate over.
     """
-    found = local_orphans(index, projects, host_of(cfg["url"]))
+    host, _ = project_key(cfg, "")
+    found = local_orphans(index, projects, host, exact="layout_host" in cfg)
     return classify_orphans(cfg, found, probe=probe)
 
 

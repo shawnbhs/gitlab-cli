@@ -14,27 +14,29 @@ calls the doer once the confirmation token comes back.
 
 Local clone operations (``sync_local``, ``clone_missing``) deliberately do
 not reimplement git. They reuse the existing gitlab-cli implementation
-(``pull.sync_many``, ``clone.cmd_clone``) through ``ctx.run_captured``,
+(``pull.sync_many`` and the managed clone primitives) through ``ctx.run_captured``,
 because those functions print to stdout and MCP speaks its protocol on
 stdout. The directory they act on is always resolved with
-``paths.resolve`` / ``paths.target_for_clone`` against the instance's
-``master_dir`` anchored to an absolute path, never against the current
-working directory.
+the canonical paths helpers against the instance's host-qualified root.
+Legacy resolution is retained only for contexts without a built config.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import unicodedata
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import clone as gl_clone
 import git as gl_git
 import paths as gl_paths
 import pull as gl_pull
+
+from gitlab_mcp.context import GitLabError
 
 __all__ = [
     "MAX_BODY_CHARS",
@@ -189,6 +191,50 @@ def _managed_dir(ctx: Any) -> str:
     return gl_paths.anchor(getattr(ctx, "master_dir", "") or ".")
 
 
+def _host_root(ctx: Any) -> str | None:
+    """Return the built host root, revalidating its directory chain."""
+    cfg = _context_cfg(ctx)
+    if "layout_host" not in cfg:
+        return None
+    root = cfg["master_dir"]
+    authority = gl_paths.gitlab_authority(cfg["url"])
+    if (root != gl_paths.managed_root(cfg["base_dir"], cfg["url"])
+            or root != ctx.master_dir or cfg["layout_host"] != authority[1]
+            or gl_paths.gitlab_authority(ctx.url) != authority):
+        raise ValueError("Invalid managed GitLab host root or authority")
+    return root
+
+
+def _managed_local_source(ctx: Any, repo: str, root: str) -> tuple[str, str]:
+    """Verify the shared Git source plus the instance's HTTP(S) port and scheme."""
+    if os.path.islink(os.path.join(repo, ".git")):
+        raise ValueError("Linked Git metadata is not a managed checkout")
+    source, _ = gl_git.managed_source(repo, root)
+    rc, raw, _ = gl_git._managed_read(repo, "remote", "get-url", "--all", "--", source)
+    url = raw.removesuffix("\n")
+    namespace = gl_paths.managed_namespace(root, repo)
+    authority = gl_paths.gitlab_authority(ctx.url)
+    if rc or gl_paths.remote_identity(url) != (authority[1], namespace):
+        raise ValueError("Git remote no longer matches the managed project")
+    # SSH/scp mirrors Git's host/namespace contract. An HTTP(S) source must
+    # also match the configured web authority; never print the effective URL.
+    if url.startswith(("http://", "https://")):
+        parsed = urlsplit(url)
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        if gl_paths.gitlab_authority(f"{parsed.scheme}://{netloc}") != authority:
+            raise ValueError("Git remote does not match the configured GitLab authority")
+    return source, url
+
+
+def _scope_digest(*parts: Any) -> str:
+    return _sha256(json.dumps(parts, sort_keys=True, separators=(",", ":")))
+
+
+def _require_approved_scope(approved: str | None, current: str | None) -> None:
+    if approved is not None and approved != current:
+        raise ValueError("Managed scope changed; get a new preview before proceeding")
+
+
 def _group_dir(ctx: Any, group: str | None) -> str:
     """Local directory for ``group`` under the managed dir (or the dir itself)."""
     dest = _managed_dir(ctx)
@@ -333,22 +379,45 @@ def _get_optional(ctx: Any, path: str, params: dict | None = None) -> Any:
 # ─── sync_local ───────────────────────────────────────────────────────────────
 
 def _repos_to_sync(ctx: Any, group: str | None,
-                   project: str | None) -> tuple[str, list[str]]:
-    """(base directory, git work trees under it that would be pulled)."""
+                   project: str | None) -> tuple[str, list[str], str | None, str | None]:
+    """Resolve worktrees and pin exact managed selection independently of the display cap."""
+    host_root = _host_root(ctx)
+    if host_root is not None:
+        base = host_root if group is None else gl_paths.managed_path(host_root, group)
+        if project is not None:
+            target = gl_paths.managed_path(host_root, project)
+            gl_paths.managed_namespace(host_root, target)
+            if group is not None and not project.startswith(group + "/"):
+                raise ValueError("Project is outside the requested group")
+            candidates = [target] if os.path.lexists(os.path.join(target, ".git")) else []
+        else:
+            candidates = gl_pull._find_git_repos(base) if os.path.isdir(base) else []
+        repos = sorted(candidates)
+        sources = []
+        for repo in repos:
+            source, url = _managed_local_source(ctx, repo, host_root)
+            gl_git._managed_check_transports(repo)
+            branch = gl_git._managed_branch(repo)
+            upstream, ref = gl_git._managed_upstream(repo, branch)
+            rc, head, _ = gl_git._managed_read(repo, "rev-parse", "--verify", "HEAD")
+            sources.append((repo, source, url, branch, upstream, ref, head.strip() if not rc else None))
+        digest = _scope_digest(gl_paths.gitlab_authority(ctx.url), host_root, base, sources)
+        return base, repos, host_root, digest
+
     base = _group_dir(ctx, group)
     if not os.path.isdir(base):
-        return base, []
+        return base, [], None, None
     repos = gl_pull._find_git_repos(base)
     if project:
         wanted = os.path.basename(project.replace("\\", "/").rstrip("/"))
         repos = [r for r in repos if os.path.basename(r) == wanted]
-    return base, repos
+    return base, repos, None, None
 
 
 def preview_sync_local(ctx: Any, group: str | None = None,
                        project: str | None = None) -> dict:
     """Describe the fast-forward-only pull of the local clones."""
-    base, repos = _repos_to_sync(ctx, group, project)
+    base, repos, _, digest = _repos_to_sync(ctx, group, project)
     scope = f"group '{group}'" if group else "the whole managed directory"
     if project:
         scope = f"project '{project}'"
@@ -377,11 +446,12 @@ def preview_sync_local(ctx: Any, group: str | None = None,
         f"under '{base}'.",
         base=base, scope=scope, repo_count=len(repos), repos=_listed(repos),
         fast_forward_only=True, policy=note,
-        workers=min(len(repos), gl_pull.DEFAULT_WORKERS))
+        workers=min(len(repos), gl_pull.DEFAULT_WORKERS),
+        **({"scope_sha256": digest} if digest is not None else {}))
 
 
 def do_sync_local(ctx: Any, group: str | None = None,
-                  project: str | None = None) -> dict:
+                  project: str | None = None, *, scope_sha256: str | None = None) -> dict:
     """Fast-forward the local clones via ``pull.sync_many``.
 
     ``pull.sync_many`` prints its progress, so it runs inside
@@ -390,8 +460,11 @@ def do_sync_local(ctx: Any, group: str | None = None,
     a full per-repo record for each repo that needs attention, which is what
     ``outcomes`` reports.
     """
-    base, repos = _repos_to_sync(ctx, group, project)
+    base, repos, host_root, digest = _repos_to_sync(ctx, group, project)
+    _require_approved_scope(scope_sha256, digest)
     if not repos:
+        if host_root is not None:
+            raise ValueError("No Git repositories in requested managed scope")
         return {
             "action": "sync_local", "ok": False, "base": base,
             "repo_count": 0, "counts": {}, "outcomes": [], "output": "",
@@ -399,9 +472,18 @@ def do_sync_local(ctx: Any, group: str | None = None,
         }
 
     workers = min(len(repos), gl_pull.DEFAULT_WORKERS)
+    options = {} if host_root is None else {"host_root": host_root,
+                                               "instance_url": _context_cfg(ctx)["url"]}
     result, output = ctx.run_captured(
-        gl_pull.sync_many, repos, base, workers=workers, show_all=False)
+        gl_pull.sync_many, repos, base, workers=workers, show_all=False, **options)
     stats, attention = result if isinstance(result, tuple) else ({}, [])
+    if host_root is not None:
+        if sum(stats.values()) != len(repos):
+            raise ValueError("Managed sync returned incomplete results; inspect local status")
+        expected = {gl_git.S_PULLED, gl_git.S_UP_TO_DATE, gl_git.S_EMPTY, gl_git.S_PURGED,
+                    gl_git.S_AHEAD, gl_git.S_DIVERGED, gl_git.S_DIRTY, gl_git.S_DETACHED}
+        if any(count and status not in expected for status, count in stats.items()):
+            raise ValueError("Managed sync could not finish for every repository; inspect local status")
 
     outcomes = [
         {
@@ -429,8 +511,127 @@ def do_sync_local(ctx: Any, group: str | None = None,
 
 # ─── clone_missing ────────────────────────────────────────────────────────────
 
+def _checkout_complete(ctx: Any, root: str, path: str, project: dict) -> None:
+    _managed_local_source(ctx, path, root)
+    gl_git._managed_check_transports(path)
+    rc, shallow, _ = gl_git._managed_read(path, "rev-parse", "--is-shallow-repository")
+    if rc or shallow.strip() != "false":
+        raise ValueError("clone history is incomplete or could not be verified")
+    rc, _, _ = gl_git._managed_read(path, "rev-parse", "--verify", "HEAD^{commit}")
+    if rc and project.get("empty_repo") is not True:
+        raise ValueError("clone HEAD could not be verified")
+
+
+def _managed_clone_plan(ctx: Any, root: str, group: str):
+    """Resolve an exact, complete inventory. Return only verified project rows."""
+    target = gl_paths.managed_path(root, group)
+    info = ctx.get(f"/groups/{quote(group, safe='')}")
+    group_id = gl_clone._project_id(info)
+    if group_id is None or info.get("full_path") != group:
+        raise ValueError("GitLab did not confirm the exact group")
+    projects, truncated, total = ctx.paginate(
+        f"/groups/{group_id}/projects",
+        {"include_subgroups": "true", "with_shared": "false"})
+    if (not isinstance(projects, list) or truncated
+            or (total is not None and len(projects) != total)):
+        raise ValueError("GitLab group project inventory is incomplete")
+
+    authority = gl_paths.gitlab_authority(ctx.url)
+    planned = {}
+    missing = []
+    skipped = []
+    seen = set()
+    ids = set()
+    for row in projects:
+        namespace = row.get("path_with_namespace") if isinstance(row, dict) else None
+        number = gl_clone._project_id(row)
+        if (not isinstance(namespace, str) or not namespace.startswith(group + "/")
+                or namespace in seen or number is None or number in ids):
+            raise ValueError("GitLab returned an invalid or duplicate project in the group inventory")
+        gl_paths._namespace_parts(namespace)
+        seen.add(namespace)
+        ids.add(number)
+        if gl_clone.is_pending_deletion(info) or gl_clone.is_pending_deletion(row):
+            skipped.append((namespace, number))
+            continue
+        path, url = gl_clone._managed_project(root, authority, namespace.rpartition("/")[0], row)
+        canonical_url = gl_git._managed_clone_source(url, ctx.url, root, path)
+        empty = row.get("empty_repo") is True
+        planned[namespace] = (path, dict(id=number, path_with_namespace=namespace,
+                                         http_url_to_repo=canonical_url, empty_repo=empty))
+        if not os.path.lexists(path):
+            gl_git._managed_clone_destination(root, path)
+            missing.append(namespace)
+        else:
+            _managed_local_source(ctx, path, root)
+    missing.sort()
+    digest = _scope_digest(authority, target, group_id, planned, missing, sorted(skipped))
+    return target, planned, missing, len(skipped), digest
+
+
+def _clone_retry_log(root: str, group: str, authority: tuple) -> dict:
+    # Same reader as load_errors(..., managed=True), plus authority binding.
+    log = gl_clone._managed_read_log(root, group)
+    if log and log.get("authority") != list(authority):
+        raise ValueError("Managed retry log belongs to a different GitLab authority")
+    return log
+
+
+def _clone_missing_targets(cfg: dict, group: str, root: str, planned: dict,
+                           missing: list[str], log: dict) -> list[dict]:
+    """Use the CLI clone machinery without asking cmd_clone to discover new targets."""
+    authority = gl_paths.gitlab_authority(cfg["url"])
+    known = {namespace: row["id"] for namespace, (_, row) in planned.items()}
+    inventory, unreadable = gl_clone._managed_inventory(cfg, root, authority)
+    copies, unresolved = gl_clone._managed_copy_ids(cfg, inventory, authority, known)
+    rows = list(log.get("errors", []))
+    for namespace in missing:
+        _, project = planned[namespace]
+        number = project["id"]
+        prior = [row for row in rows if gl_clone._project_id(row) == number]
+        if any(row.get("namespace") != namespace for row in prior):
+            continue  # CLI requires a migration review for changed namespaces.
+        result = gl_clone._managed_row(
+            root, authority, namespace.rpartition("/")[0], cfg, project,
+            inventory.get(namespace) or copies.get(number), unreadable or unresolved,
+            next((row for row in prior if row.get("reason") in (gl_clone.REASON_LFS, "shallow")),
+                 prior[0] if prior else None))
+        rows = [row for row in rows if gl_clone._project_id(row) != number]
+        if result:
+            rows.append(result)
+    if rows != log.get("errors", []):
+        path = gl_clone._error_log_path(root, group, managed=True)
+        gl_paths.managed_path(root, group)
+        if rows:
+            gl_clone._managed_write_log(path, {"group": group, "authority": list(authority), "errors": rows})
+        elif log:
+            os.unlink(path)
+    return rows
+
+
 def preview_clone_missing(ctx: Any, group: str) -> dict:
     """Describe the clone of a group's projects into the managed directory."""
+    root = _host_root(ctx)
+    if root is not None:
+        try:
+            target, planned, missing, skipped, digest = _managed_clone_plan(ctx, root, group)
+            log = _clone_retry_log(root, group, gl_paths.gitlab_authority(ctx.url))
+        except (GitLabError, ValueError) as exc:
+            return _preview("clone_missing", "Cannot verify clone plan", ok=False,
+                            reasons=[str(exc)], group=group)
+        existing = sorted(set(planned) - set(missing))
+        summary = (f"{len(missing)} canonical targets missing under '{target}'." if planned
+                   else f"GitLab confirmed no eligible projects under '{group}'.")
+        warnings = []
+        if log.get("errors"):
+            warnings.append(f"{len(log['errors'])} unresolved managed clone diagnostics for this group.")
+        return _preview(
+            "clone_missing", summary, warnings=warnings,
+            group=group, managed_dir=root, target=target, scope_sha256=digest,
+            existing_count=len(existing), existing=_listed(existing),
+            remote_project_count=len(planned) + skipped, skipped_pending_deletion=skipped,
+            would_clone=_listed(missing),
+            policy="Exact project paths only. Legacy copies can defer cloning; nothing is moved or overwritten.")
     if not isinstance(group, str) or not group.strip():
         raise ValueError("group must be a non-empty string")
     group = group.strip()
@@ -478,8 +679,36 @@ def preview_clone_missing(ctx: Any, group: str) -> dict:
                 "managed directory is skipped, never cloned twice."))
 
 
-def do_clone_missing(ctx: Any, group: str) -> dict:
-    """Clone the group's missing projects via ``clone.cmd_clone``."""
+def do_clone_missing(ctx: Any, group: str, *, scope_sha256: str | None = None) -> dict:
+    """Clone only the verified missing projects, using the CLI's clone primitives."""
+    root = _host_root(ctx)
+    if root is not None:
+        target, planned, missing, skipped, digest = _managed_clone_plan(ctx, root, group)
+        _require_approved_scope(scope_sha256, digest)
+        authority = gl_paths.gitlab_authority(ctx.url)
+        log = _clone_retry_log(root, group, authority)
+        rows = log.get("errors", [])
+        output = ""
+        if missing:
+            rows, output = ctx.run_captured(
+                _clone_missing_targets, _context_cfg(ctx), group, root, planned, missing, log)
+        unresolved = {}
+        for namespace, (path, project) in planned.items():
+            try:
+                _checkout_complete(ctx, root, path, project)
+            except ValueError as exc:
+                unresolved[namespace] = str(exc)
+        if unresolved or rows:
+            raise ValueError(f"Managed clone incomplete: {len(unresolved)} canonical targets unresolved, "
+                             f"{len(rows)} scoped diagnostics. Inspect the managed retry log and local status.")
+        return {
+            "action": "clone_missing", "ok": True, "group": group,
+            "managed_dir": root, "target": target, "repo_count": len(planned),
+            "skipped_pending_deletion": skipped, "empty_inventory": not planned and not skipped,
+            "repos": _listed(sorted(os.path.relpath(path, target) for path, _ in planned.values())),
+            "output": output,
+        }
+    _require_approved_scope(scope_sha256, None)
     if not isinstance(group, str) or not group.strip():
         raise ValueError("group must be a non-empty string")
     group = group.strip()

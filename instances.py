@@ -5,7 +5,7 @@
 #   - a friendly name       (Work, Personal, gitlab.com, ...)
 #   - a URL
 #   - a token → stored in ~/.gitlab-cli/env with chmod 600, NOT in this file
-#   - a folder of its own to clone into
+#   - a base directory for managed clones; the hostname selects its child
 #   - min_access_level → only groups where you have at least this level
 
 import os
@@ -47,6 +47,19 @@ class InstancesFileError(RuntimeError):
 
 def _empty() -> dict:
     return {"instances": [], "active": None}
+
+
+def _authority_problem(instances: list) -> str:
+    authorities = {}
+    for i, inst in enumerate(instances, 1):
+        try:
+            authority = _paths.gitlab_authority(inst["url"])
+        except (KeyError, TypeError, _paths.UnsafePath):
+            return f"instance #{i} has an invalid GitLab URL; use only an HTTP(S) host and optional port"
+        host = authority[1]
+        if authorities.setdefault(host, authority) != authority:
+            return f"conflicting GitLab authorities for hostname {host}; use a distinct hostname or one scheme and port"
+    return ""
 
 
 def _read_instances() -> tuple:
@@ -101,12 +114,14 @@ def _read_instances() -> tuple:
                     shape = f"instance #{i} has no {' / '.join(repr(k) for k in miss)}"
             if shape:
                 break
+        if not shape:
+            shape = _authority_problem(data.get("instances", []))
     if shape:
         return _empty(), creds.catalog_line(
             f"invalid instances.json: {shape}", code="config_invalid",
             title="instances.json is not valid",
             cause=f"{path}: {shape}",
-            fix="Add the missing field in a text editor, or delete that entry")
+            fix="Correct the instance entry in a text editor, or remove that entry")
 
     data.setdefault("instances", [])
     data.setdefault("active", None)
@@ -172,41 +187,14 @@ def unknown_instance_keys(inst: dict) -> list:
 
 
 def _normalize_instance(inst: dict) -> dict:
-    """
-    Make an instance record safe to persist.
-
-    Three jobs now. Two are about keeping `master_dir` an UNFOLDED base:
-      * if the record is really a built cfg (it carries `base_dir`), restore
-        master_dir from base_dir and drop every cfg-only key — including the
-        resolved token, which must never be written to instances.json;
-      * otherwise strip any trailing copies of `folder` that already crept in.
-
-    The third is PRESERVATION: every key in PERSISTED_KEYS is left alone, and
-    anything outside it is reported by `unknown_instance_keys()` rather than
-    disappearing without a word.
-
-    Mutates and returns `inst`, so the caller's in-memory copy is fixed too.
-    """
+    """Persist built configs as raw records, with the original base, not the host root."""
     if not isinstance(inst, dict):
         return inst
-
-    base = (inst.get("base_dir") or "").strip()
-    if base:
-        # base_dir is always absolute (it came out of paths.anchor). The record
-        # it is replacing usually held a RELATIVE value, and persisting an
-        # absolute one would silently pin the tree to today's install dir, so
-        # give the relative form back whenever base_dir really is install-local.
-        inst["master_dir"] = _relative_to_install(base)
-        # A built cfg carries a live token; never persist it.
+    if inst.get("base_dir"):
+        inst["master_dir"] = _relative_to_install(inst["base_dir"])
         inst.pop("token", None)
-    else:
-        md = _strip_folder_suffix(inst.get("master_dir", "") or "",
-                                  inst.get("folder") or "")
-        if md:
-            inst["master_dir"] = md
-
-    for k in _CFG_ONLY_KEYS:
-        inst.pop(k, None)
+    for key in _CFG_ONLY_KEYS:
+        inst.pop(key, None)
     return inst
 
 
@@ -220,7 +208,10 @@ def _save(data: dict):
     problem = instances_file_problem()
     if problem:
         raise InstancesFileError(problem)
-    for inst in (data or {}).get("instances", []) or []:
+    records = (data or {}).get("instances", []) or []
+    if problem := _authority_problem(records):
+        raise InstancesFileError(problem)
+    for inst in records:
         _normalize_instance(inst)
     os.makedirs(CONFIG_DIR, exist_ok=True)
     creds.write_private_file(INSTANCES_FILE,
@@ -298,32 +289,7 @@ def migrate_inline_tokens() -> int:
 # Keys that only ever exist on a BUILT cfg, never on a raw instance record.
 # Their presence is the reliable signal that a cfg was handed back to code that
 # expects an instance dict.
-_CFG_ONLY_KEYS = ("base_dir", "headers", "min_access")
-
-
-def _strip_folder_suffix(master_dir: str, folder: str) -> str:
-    """
-    Remove any trailing repetitions of `folder` from `master_dir`.
-
-    build_cfg publishes master_dir = base_dir + folder. If that value is ever
-    written back into the `master_dir` field of an instance record, the next
-    build appends `folder` a second time and every path for that instance sits
-    one level too deep (MasterGroups/acme/acme). Stripping here makes
-    the accumulation unrepresentable rather than merely unlikely.
-
-    A master_dir that is *exactly* the folder name is left alone: there is no
-    parent left to fall back to, and the user may have meant it.
-    """
-    folder = (folder or "").strip()
-    md     = (master_dir or "").strip()
-    if not folder or not md:
-        return md
-    while True:
-        norm   = os.path.normpath(md)
-        parent = os.path.dirname(norm)
-        if os.path.basename(norm) != folder or not parent:
-            return md
-        md = parent
+_CFG_ONLY_KEYS = ("base_dir", "headers", "min_access", "layout_host")
 
 
 def _relative_to_install(path: str) -> str:
@@ -343,44 +309,25 @@ def _relative_to_install(path: str) -> str:
 
 
 def _base_of(inst: dict) -> str:
-    """
-    The UNFOLDED base directory of an instance record.
-
-    Accepts a raw instance dict and, idempotently, a dict that is already a
-    built cfg: a cfg carries `base_dir` (authoritative, folder not applied)
-    alongside a `master_dir` that already has the folder in it. Preferring
-    base_dir makes build_cfg(build_cfg(x)) == build_cfg(x) for any depth, so
-    the folder is applied exactly once no matter how the dict travelled.
-    """
-    base = (inst.get("base_dir") or "").strip()
-    if base:
-        return base
-    return _strip_folder_suffix(inst.get("master_dir", DEFAULT_MASTER)
-                                or DEFAULT_MASTER,
-                                inst.get("folder") or "")
+    """Raw records store the unfolded base in master_dir; built configs use base_dir."""
+    return inst.get("base_dir") or inst.get("master_dir") or DEFAULT_MASTER
 
 
 def build_cfg(inst: dict, allow_generic: bool = False) -> dict:
-    """
-    Raw instance → a config the rest of the modules can use.
-
-    If 'folder' is empty, repos go straight into master_dir
-    (legacy behaviour — existing configs keep working).
-    If it is set, each GitLab gets its own subfolder, which avoids
-    collisions when two GitLabs have groups with the same name.
-    """
-    token       = creds.resolve_token(inst, allow_generic=allow_generic)
+    """Build strict managed config; legacy folder is metadata only."""
+    url         = inst["url"]
     base_dir    = _paths.anchor(_base_of(inst))
-    folder      = (inst.get("folder") or "").strip()
-    inst_folder = os.path.join(base_dir, folder) if folder else base_dir
+    inst_folder = _paths.managed_root(base_dir, url)
+    token       = creds.resolve_token(inst, allow_generic=allow_generic)
 
     cfg = {
         "token":       token,
         "token_env":   inst.get("token_env") or creds.env_var_name(inst["name"]),
-        "url":         inst["url"].rstrip("/"),
+        "url":         url.rstrip("/"),
         "master_dir":  inst_folder,
         "base_dir":    base_dir,
-        "folder":      folder,
+        "layout_host": os.path.basename(inst_folder),
+        "folder":      inst.get("folder", ""),
         "name":        inst["name"],
         "min_access":  int(inst.get("min_access_level") or 0),
         "headers":     {"PRIVATE-TOKEN": token},
@@ -431,19 +378,15 @@ def _ask(label: str, default: str = "") -> str:
 
 
 def _normalize_url(url: str) -> str:
-    url = url.strip().rstrip("/")
+    url = url.strip()
     if not url:
         return ""
-    if not url.startswith(("http://", "https://")):
-        # Internal host (no dot, or .internal) → http, everything else → https
-        url = ("http://" if "." not in url.split("/")[0].split(":")[0]
-               or url.endswith(".internal") else "https://") + url
-    return url
-
-
-def _slug(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "-"
-                   for c in name.lower()).strip("-") or "gitlab"
+    if "://" not in url:
+        host = url.split("/", 1)[0].split(":", 1)[0].lower().removesuffix(".")
+        scheme = "http" if "." not in host or host.endswith(".internal") else "https"
+        url = f"{scheme}://{url}"
+    _paths.gitlab_authority(url)
+    return url.rstrip("/")
 
 
 def access_label(level) -> str:
@@ -542,8 +485,13 @@ def add_instance(data: dict = None, quiet_header: bool = False) -> str | None:
             print_warn("The URL was empty.")
             return None
 
+        problem = _authority_problem([*data["instances"], {"url": url}])
+        if problem:
+            print_warn(problem)
+            return None
+
         # 2) Name
-        guess = url.split("//")[-1].split("/")[0].split(".")[0].capitalize()
+        guess = _paths.gitlab_host(url).split(".")[0].capitalize()
         name  = _ask("Friendly name", guess)
         if any(i["name"].lower() == name.lower() for i in data["instances"]):
             print_warn(f"'{name}' already exists.")
@@ -561,10 +509,11 @@ def add_instance(data: dict = None, quiet_header: bool = False) -> str | None:
         # 4) Folder
         print(f"\n  {DIM}Where should the repos be cloned?{RESET}")
         base = _ask("Base folder", DEFAULT_MASTER)
-        print(f"  {DIM}A subfolder avoids collisions when two GitLabs have"
-              f" groups with the same name. Leave empty for no subfolder.{RESET}")
-        folder = _ask("Subfolder for this GitLab", _slug(name))
+        root = _paths.managed_root(base, url)
 
+    except _paths.UnsafePath as exc:
+        print_warn(str(exc))
+        return None
     except (KeyboardInterrupt, EOFError):
         print()
         return None
@@ -601,7 +550,6 @@ def add_instance(data: dict = None, quiet_header: bool = False) -> str | None:
         "url":              url,
         "token_env":        var,
         "master_dir":       base,
-        "folder":           folder,
         "min_access_level": min_access,
     }
     data["instances"].append(inst)
@@ -615,7 +563,7 @@ def add_instance(data: dict = None, quiet_header: bool = False) -> str | None:
 
     print(f"\n  {GREEN}✔ '{name}' added{RESET}")
     print(f"  {DIM}Token → env var {var} (file: {creds.ENV_FILE}, chmod 600){RESET}")
-    print(f"  {DIM}Repos → {os.path.join(base, folder)}/{RESET}")
+    print(f"  {DIM}Repos → {root}/{RESET}")
     # The access filter changes WHICH GROUPS THE TOOL EVER LISTS, so it is
     # stated at every point it can have been set, not only inside the picker.
     print(f"  {DIM}{access_summary(min_access)}{RESET}\n")
@@ -843,7 +791,6 @@ def edit_instance(data: dict):
         inst   = data["instances"][idx]
         tok    = creds.resolve_token(inst)
         base   = inst.get("master_dir", DEFAULT_MASTER)
-        folder = (inst.get("folder") or "").strip()
         lvl    = int(inst.get("min_access_level") or 0)
 
         print(f"\n  {BOLD}{inst['name']}{RESET}")
@@ -856,7 +803,7 @@ def edit_instance(data: dict):
         print(f"  {CYAN}1.{RESET}  New token")
         print(f"  {CYAN}2.{RESET}  Rename")
         print(f"  {CYAN}3.{RESET}  Change URL")
-        print(f"  {CYAN}4.{RESET}  Change folder")
+        print(f"  {CYAN}4.{RESET}  Change base folder")
         print(f"  {CYAN}5.{RESET}  Change access filter")
         print(f"  {CYAN}6.{RESET}  Test connection")
         print(f"  {RED}7.{RESET}  Delete this GitLab")
@@ -911,26 +858,41 @@ def edit_instance(data: dict):
 
         elif action == "3":
             try:
-                new = _normalize_url(input(f"  New URL [{inst['url']}]: ").strip())
+                new = _normalize_url(input(f"  New URL [{inst['url']}]: "))
+                if not new:
+                    continue
+                _paths.managed_root(base, new)
             except (KeyboardInterrupt, EOFError):
                 continue
-            if new:
-                inst["url"] = new
+            except _paths.UnsafePath as exc:
+                print_warn(str(exc))
+                continue
+            updated = dict(inst, url=new)
+            problem = _authority_problem([*instances[:idx], updated, *instances[idx + 1:]])
+            if problem:
+                print_warn(problem)
+                continue
+            instances[idx] = updated
+            if _try_save(data):
                 caps.clear_cache(inst["name"])
-                if _try_save(data):
-                    print(f"  {GREEN}✔ Updated{RESET}")
+                print(f"  {GREEN}✔ Updated (existing clones unchanged){RESET}")
+            else:
+                instances[idx] = inst
 
         elif action == "4":
             try:
                 nb = input(f"  Base folder [{base}]: ").strip() or base
-                nf = input(f"  Subfolder (empty = no subfolder) "
-                           f"[{folder or '-'}]: ").strip()
+                root = _paths.managed_root(nb, inst["url"])
             except (KeyboardInterrupt, EOFError):
                 continue
-            inst["master_dir"] = nb
-            inst["folder"]     = "" if nf == "-" else (nf or folder)
+            except _paths.UnsafePath as exc:
+                print_warn(str(exc))
+                continue
+            instances[idx] = dict(inst, master_dir=nb)
             if _try_save(data):
-                print(f"  {GREEN}✔ {build_cfg(inst)['master_dir']}/{RESET}")
+                print(f"  {GREEN}✔ {root}/ (existing clones unchanged){RESET}")
+            else:
+                instances[idx] = inst
 
         elif action == "5":
             inst["min_access_level"] = _pick_access_level(lvl)
@@ -999,7 +961,10 @@ def print_instances():
         url  = inst["url"]
         print(f"  {mark} {CYAN}{i}.{RESET} {BOLD}{name}{RESET}")
         print(f"       {DIM}url      :{RESET} {url}")
+        print(f"       {DIM}host     :{RESET} {cfg['layout_host']}")
         print(f"       {DIM}folder   :{RESET} {cfg['master_dir']}")
+        if cfg["folder"]:
+            print(f"       {DIM}legacy folder (migration only):{RESET} {cfg['folder']!r}")
         print(f"       {DIM}token    :{RESET} {state}")
         # The token's role and the configured FILTER are different facts. The
         # old screen printed only the first under the label "access", so a

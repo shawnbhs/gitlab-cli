@@ -43,7 +43,10 @@ from typing import Any, Iterable, Sequence
 from urllib.parse import quote
 
 import git as gl_git
+import paths as gl_paths
 import pull as gl_pull
+
+from gitlab_mcp.actions import _host_root, _managed_local_source
 
 __all__ = [
     "MAX_DIFF_CHARS",
@@ -1555,6 +1558,7 @@ SAFE_GIT_ENV: dict[str, str] = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_ALLOW_PROTOCOL": "",
     "GIT_ASKPASS": "",
     "SSH_ASKPASS": "",
     "GIT_PAGER": "cat",
@@ -1726,7 +1730,7 @@ def local_status(ctx: Any, group: str | None = None) -> dict:
 
     For each repository: current branch, whether the working tree is dirty
     and by how many entries, how far ahead/behind its upstream it is, and its
-    ``origin`` URL with any embedded credential stripped.
+    verified managed remote name. Unresolved repositories are listed separately.
 
     **No network access.** Nothing fetches, so ahead/behind reflects the last
     time the clone was updated — that is the point, since this report is used
@@ -1743,21 +1747,36 @@ def local_status(ctx: Any, group: str | None = None) -> dict:
     """
     import os
 
-    base = _contained_dir(ctx.master_dir, group if group else None)
+    host_root = _host_root(ctx)
+    if host_root is None:
+        base = _contained_dir(ctx.master_dir, group if group else None)
+    else:
+        base = host_root if group is None else gl_paths.managed_path(host_root, group)
 
     if not os.path.isdir(base):
         return {"base": base, "group": group, "repos": [], "count": 0,
                 "dirty": 0, "output": "",
-                "note": "managed directory does not exist locally"}
+                "note": "managed directory does not exist locally",
+                **({"blocked": [], "blocked_count": 0, "fetched": False} if host_root else {})}
 
     found, output = ctx.run_captured(gl_pull._find_git_repos, base)
     env = _git_env(ctx)
 
     repos: list[dict] = []
+    blocked: list[dict] = []
     for repo in sorted(found or []):
         real_repo = os.path.realpath(repo)
         if os.path.commonpath([base, real_repo]) != base:
             continue                     # a symlinked escape; never touch it
+        source = None
+        if host_root is not None:
+            try:
+                source, _ = _managed_local_source(ctx, repo, host_root)
+                gl_git._managed_check_transports(repo)
+            except ValueError as exc:
+                blocked.append({"relative_path": os.path.relpath(repo, base),
+                                "reason": str(exc)})
+                continue
         code, branch = _git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], env)
         branch_name = branch if code == 0 else None
 
@@ -1773,8 +1792,10 @@ def local_status(ctx: Any, group: str | None = None) -> dict:
 
         ahead, behind = _ahead_behind(repo, env)
 
-        code, origin = _git(repo, ["remote", "get-url", "origin"], env)
-        origin_url = gl_git.strip_userinfo(origin) if code == 0 and origin else None
+        origin_url = None
+        if source is None:
+            code, origin = _git(repo, ["remote", "get-url", "origin"], env)
+            origin_url = gl_git.strip_userinfo(origin) if code == 0 and origin else None
 
         repos.append({
             "path": repo,
@@ -1786,7 +1807,8 @@ def local_status(ctx: Any, group: str | None = None) -> dict:
             "ahead": ahead,
             "behind": behind,
             "has_upstream": ahead is not None,
-            "origin": origin_url,
+            **({"remote": source, "namespace": gl_paths.managed_namespace(host_root, repo)}
+               if host_root is not None else {"origin": origin_url}),
         })
 
     return {
@@ -1795,6 +1817,7 @@ def local_status(ctx: Any, group: str | None = None) -> dict:
         "instance": getattr(ctx, "name", None),
         "repos": repos,
         "count": len(repos),
+        **({"blocked": blocked, "blocked_count": len(blocked)} if host_root is not None else {}),
         "dirty": sum(1 for r in repos if r["dirty"]),
         "ahead": sum(r["ahead"] or 0 for r in repos),
         "behind": sum(r["behind"] or 0 for r in repos),

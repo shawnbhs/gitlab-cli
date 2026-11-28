@@ -229,7 +229,7 @@ class DiscardedKeysAreNamedNotSwallowed(SandboxConfig):
 
     def test_the_cfg_only_key_list_is_unchanged(self):
         self.assertEqual(tuple(I._CFG_ONLY_KEYS),
-                         ("base_dir", "headers", "min_access"))
+                         ("base_dir", "headers", "min_access", "layout_host"))
 
 
 # ─── item 2: no silent default on the access filter ───────────────────────────

@@ -7,6 +7,10 @@
 # breaking release cannot reach an install without a deliberate bump.
 requests>=2.33.0,<3
 python-dotenv>=1.2.2,<2
+# paths.py imports idna directly (IDNA host normalisation); declared
+# explicitly instead of relying on requests' transitive pin.
+# Floor 3.7: 3.6 carries CVE-2024-3651.
+idna>=3.7,<4
 # MCP server + `gitlab-cli mcp` / `gitlab-cli report` (gitlab_mcp/).
 # Floor 1.30.0: 1.29.0 carries CVE-2026-59951 (fixed in 1.30.0).
 # Ceiling <2: mcp 2.x removed mcp.server.fastmcp, which

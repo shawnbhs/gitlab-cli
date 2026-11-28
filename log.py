@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import datetime
 
+import coverage as cov
 import error_catalog
 import paths
 from git import get_commits_since
@@ -563,15 +564,15 @@ def _print_tree(group_path: str, repos: list[str], dest: str,
     return total, matched
 
 
-def cmd_log(cfg: dict, group_path: str, dest: str = ".",
+def cmd_log(cfg: dict, group_path: str, dest: str | None = None,
             since: str = "1d", author: str = None):
-    group_name = group_path.split("/")[-1]
-    # cfg["folder"] is authoritative for the shaping rules in paths.candidates;
-    # without it paths.is_instance_folder() falls back to the global pool in
-    # ~/.gitlab-cli/instances.json, which is either stale (folder key dropped →
-    # "Folder does not exist" for a group that is fully cloned) or belongs to a
-    # different instance. .get() so a caller without the key is unchanged.
-    local_path = paths.resolve(group_path, dest, cfg.get("folder"))
+    managed = "layout_host" in cfg
+    if managed:
+        dest = cov.managed_destination(cfg, dest)
+        local_path = paths.managed_path(dest, group_path)
+    else:
+        dest = dest or "."
+        local_path = paths.resolve(group_path, dest, cfg.get("folder"))
 
     print_section(f"Log: {group_path}")
 
@@ -587,6 +588,8 @@ def cmd_log(cfg: dict, group_path: str, dest: str = ".",
                   "your commits.")
         return
 
+    if managed:
+        print_info(f"Folder: {local_path}")
     print_info(f"Since : {since_parsed}")
     # Echo the ABSOLUTE moment git settled on. Without this the user cannot
     # see what was actually applied, which is how the original bug hid.
@@ -599,7 +602,13 @@ def cmd_log(cfg: dict, group_path: str, dest: str = ".",
         print_warn(f"Folder '{local_path}' does not exist. Clone it first.")
         return
 
-    repos = _find_git_repos(local_path)
+    if managed:
+        index, unresolved = cov.scan_managed(dest, subtree=local_path)
+        repos = list(index.values())
+        if unresolved:
+            print_warn(f"{len(unresolved)} unresolved repo(s) excluded from log.")
+    else:
+        repos = _find_git_repos(local_path)
     if not repos:
         print_warn("No git repos found. Run Clone first!")
         return

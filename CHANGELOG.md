@@ -11,12 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Managed GitLab clones use `MasterGroups/<gitlab-host>/<full/project/path>`.
+  A read-only preview shows old-layout moves; no repository is moved automatically.
 - **Members → Manage → `4. Project Permissions`** grants, changes and
   revokes direct project membership after confirmation. It never removes
   inherited group access and offers Guest through Maintainer only.
 
 ### Security
 
+- Managed CLI and MCP sync verify the configured GitLab authority before
+  fetching and again before updating the working tree. Incomplete project
+  lists fail closed.
 - Project membership writes validate numeric IDs, refuse incomplete
   listings, disable redirects and report failures through the existing
   redacted write-failure path.

@@ -7,6 +7,9 @@ import os
 import re
 import shutil
 import stat
+from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
+from uuid import uuid4
 from printer import print_ok, print_warn, print_error
 from errors import log_error, redact
 
@@ -166,15 +169,16 @@ def clone_umask(mask: int = None):
 
 
 def _run(args: list[str], cwd: str = None, timeout: int = GIT_TIMEOUT,
-         env_extra: dict = None, umask: int = None):
+         env_extra: dict = None, umask: int = None, *, raw_stdout: bool = False,
+         env_base: dict | None = None):
     """Run git; always returns (rc, stdout, stderr) and never hangs.
 
-    stdout/stderr are redacted: a remote URL can carry a token, and this
-    text is both printed and written to ~/.gitlab-cli/errors.log.
+    stdout/stderr are redacted unless raw_stdout is set for internal stdout
+    parsing. Never display or log raw stdout: it may contain credentials.
 
     `env_extra` adds environment variables for this one git process only.
     It is how a credential reaches git without ever touching argv or a
-    file — see _auth_env().
+    file — see _auth_env(). `env_base` replaces the inherited child environment.
 
     `umask` (or an enclosing clone_umask() block) runs git under a tighter
     file-creation mask, so the files git creates are born private instead
@@ -193,7 +197,7 @@ def _run(args: list[str], cwd: str = None, timeout: int = GIT_TIMEOUT,
     mask = umask if umask is not None else _ACTIVE_UMASK
     if mask is not None and os.name == "posix" and os.path.exists("/bin/sh"):
         args = _umask_wrap(args, mask)
-    env = dict(os.environ)
+    env = dict(os.environ if env_base is None else env_base)
     # Suppress the interactive username/password prompt, which would hang us.
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env.setdefault("GIT_ASKPASS", "echo")
@@ -204,7 +208,8 @@ def _run(args: list[str], cwd: str = None, timeout: int = GIT_TIMEOUT,
             args, cwd=cwd, capture_output=True, text=True,
             timeout=timeout, env=env,
         )
-        return r.returncode, redact(r.stdout.strip()), redact(r.stderr.strip())
+        out = r.stdout if raw_stdout else redact(r.stdout.strip())
+        return r.returncode, out, redact(r.stderr.strip())
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout}s"
     except Exception as e:                       # pragma: no cover
@@ -495,7 +500,7 @@ def base_url(url: str) -> str:
     return f"{scheme}://{host}/" if host else ""
 
 
-def _auth_env(url: str, token: str) -> dict:
+def _auth_env(url: str, token: str, *, start: int | None = None) -> dict:
     """Environment-only git config that carries the token for ONE git process.
 
     GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (git >= 2.31)
@@ -519,10 +524,11 @@ def _auth_env(url: str, token: str) -> dict:
     if any(c in token for c in _CRED_FORBIDDEN):
         return {}
     basic = base64.b64encode(f"oauth2:{token}".encode()).decode()
-    try:
-        start = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-    except ValueError:
-        start = 0
+    if start is None:
+        try:
+            start = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
+        except ValueError:
+            start = 0
     return {
         f"GIT_CONFIG_KEY_{start}":   f"http.{base}.extraHeader",
         f"GIT_CONFIG_VALUE_{start}": f"Authorization: Basic {basic}",
@@ -965,6 +971,106 @@ def deepen_repo(path: str, token: str = "", step: int = 1,
 
 # ─── Clone ───────────────────────────────────────────────────────
 
+def _managed_clone_source(http_url: str, instance_url: str, host_root: str,
+                          target_path: str) -> str:
+    from paths import gitlab_authority, managed_namespace, managed_path, remote_identity
+
+    scheme, host, port = gitlab_authority(instance_url)
+    namespace = managed_namespace(host_root, target_path)
+    root = os.path.abspath(host_root)
+    if (os.path.basename(root) != host or managed_path(root, namespace) != target_path
+            or remote_identity(http_url) != (host, namespace)):
+        raise ValueError("clone source or destination does not match the managed project")
+    parsed = urlsplit(http_url)
+    if (parsed.scheme != scheme
+            or gitlab_authority(f"{scheme}://{parsed.netloc}") != (scheme, host, port)):
+        raise ValueError("clone URL does not match the configured GitLab authority")
+    authority = host if port == (443 if scheme == "https" else 80) else f"{host}:{port}"
+    return f"{scheme}://{authority}{parsed.path}"
+
+
+def _managed_clone_destination(root: str, target: str) -> None:
+    parent = os.path.dirname(target)
+    while True:
+        if os.path.lexists(os.path.join(parent, ".git")):
+            raise ValueError("clone destination is inside a Git working tree")
+        if parent == root:
+            break
+        parent = os.path.dirname(parent)
+    if os.path.lexists(target) and os.listdir(target):
+        raise ValueError("clone destination is not empty")
+
+
+def clone_repo_managed(token: str, http_url: str, target_path: str, *,
+                       instance_url: str, host_root: str, allow_shallow: bool = True,
+                       shallow_depth_hint: int = 10) -> dict:
+    """Clone only the configured HTTP(S) authority and exact managed project.
+
+    Return normal clone statuses without saving credentials or fetching LFS.
+    A shallow retry never removes an occupied destination.
+    """
+    res = {"status": S_ERROR, "path": target_path, "shallow": False,
+           "commits": 0, "detail": "", "lfs": ""}
+    try:
+        root = os.path.abspath(host_root)
+        url = _managed_clone_source(http_url, instance_url, root, target_path)
+        _managed_clone_destination(root, target_path)
+        if allow_shallow and (type(shallow_depth_hint) is not int or shallow_depth_hint < 1):
+            raise ValueError("invalid managed clone depth")
+        auth = _auth_env(url, token, start=0)
+        if token and not auth:
+            raise ValueError("invalid managed clone credential")
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with TemporaryDirectory(prefix="gitlab-cli-clone-") as isolated:
+            # Suppress ambient Git config, helpers, proxies and trace output.
+            # Use the canonical URL directly so origin and reflog stay usable.
+            env = {key: os.environ[key] for key in ("SYSTEMROOT",) if key in os.environ}
+            env.update(HOME=isolated, XDG_CONFIG_HOME=isolated, PATH=os.defpath,
+                       GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_CEILING_DIRECTORIES=os.path.dirname(isolated),
+                       GIT_TEMPLATE_DIR="", GIT_ASKPASS="", GIT_TERMINAL_PROMPT="0",
+                       GIT_ALLOW_PROTOCOL="", LC_ALL="C")
+            count = int(auth.get("GIT_CONFIG_COUNT", "0"))
+            transport = {**env, **auth, **_LFS_SKIP_SMUDGE,
+                         "GIT_ALLOW_PROTOCOL": url.partition(":")[0],
+                         "GIT_CONFIG_COUNT": str(count + 1),
+                         f"GIT_CONFIG_KEY_{count}": "http.followRedirects",
+                         f"GIT_CONFIG_VALUE_{count}": "false"}
+            cmd = [GIT_BIN, "clone", "--quiet", "--no-recurse-submodules"]
+            args = ["--", url, target_path]
+            rc, _, err = _run([*cmd, *args], cwd=isolated, env_base=transport,
+                              umask=CLONE_UMASK)
+            if rc and allow_shallow and is_transfer_cap(err):
+                _managed_clone_source(http_url, instance_url, root, target_path)
+                _managed_clone_destination(root, target_path)
+                rc, _, err = _run([*cmd, f"--depth={shallow_depth_hint}", *args],
+                                  cwd=isolated, env_base=transport, umask=CLONE_UMASK)
+            if rc:
+                status = classify(err)
+                return dict(res, status=S_ERROR if status == S_LFS else status,
+                            detail="verified GitLab clone failed")
+            # No credentials or transport for post-clone inspection. A GitLab
+            # repository can separately name an LFS endpoint in .lfsconfig.
+            shallow = os.path.isfile(os.path.join(target_path, ".git", "shallow"))
+            rc, out, _ = _run([GIT_BIN, "-C", target_path, "rev-list", "--count", "HEAD"],
+                              env_base=env)
+            commits = int(out) if rc == 0 and out.isascii() and out.isdecimal() else 0
+            lfs = ("LFS content not fetched by managed clone"
+                   if _attrs_mention_lfs(target_path, env_base=env) else "")
+            status = S_SHALLOW if shallow else S_LFS if lfs else "ok"
+            detail = "clone is shallow — history incomplete" if shallow else lfs
+            return dict(res, status=status, shallow=shallow, commits=commits,
+                        detail=detail, lfs=lfs)
+    except UnicodeError:
+        return dict(res, detail="invalid managed clone credential or text encoding")
+    except ValueError as exc:
+        # Known validation messages are fixed strings. Never return raw input
+        # or Git diagnostics from a managed clone.
+        return dict(res, detail=str(exc))
+    except OSError:
+        return dict(res, detail="could not prepare or inspect managed clone destination")
+
+
 def clone_repo(token: str, http_url: str, target_path: str) -> bool:
     """Clone with a CLEAN remote URL. The token never enters .git/config.
 
@@ -1146,7 +1252,7 @@ _LFS_ATTR_RE = re.compile(r"\bfilter\s*=\s*lfs\b")
 _ATTR_READ_MAX = 256 * 1024
 
 
-def _attrs_mention_lfs(target: str) -> bool:
+def _attrs_mention_lfs(target: str, *, env_base: dict | None = None) -> bool:
     """True when the root or any tracked .gitattributes routes to the LFS filter.
 
     Works without git-lfs installed, which is exactly when it matters: the
@@ -1154,8 +1260,11 @@ def _attrs_mention_lfs(target: str) -> bool:
     (never a symlink or FIFO a hostile repository might commit).
     """
     paths = [".gitattributes"]
+    run_env = {} if env_base is None else {"env_base": env_base}
     rc, out, _ = _run([GIT_BIN, "-C", target, "ls-files", "-z", "--",
-                       "*/.gitattributes"], timeout=GIT_TIMEOUT)
+                       "*/.gitattributes"], timeout=GIT_TIMEOUT, **run_env)
+    if rc != 0 and env_base is not None:
+        raise ValueError("could not inspect managed clone LFS attributes")
     if rc == 0 and out:
         paths += [p for p in out.split("\0") if p]
     root = os.path.realpath(target)
@@ -1440,16 +1549,265 @@ def _is_purged_clone(path: str, remotes: list[str]) -> bool:
     return False
 
 
-def sync_repo(path: str) -> dict:
-    """
-    fetch --all, then work out which remote is ahead for EACH remote and
-    fast-forward only when that is safe.
-    """
+def _managed_read(path: str, *args: str):
+    # Redacting machine-readable values before validation can change identity.
+    # Callers never display this stdout, including when a probe fails.
+    return _run([GIT_BIN, "-C", path, *args], raw_stdout=True)
+
+
+def _managed_branch(path: str) -> str | None:
+    rc, out, err = _managed_read(path, "symbolic-ref", "--quiet", "HEAD")
+    if rc == 1 and not err:
+        return None
+    ref = out.removesuffix("\n")
+    if rc != 0:
+        raise ValueError("could not determine current branch")
+    return _managed_head_ref(path, ref).removeprefix("refs/heads/")
+
+
+def _managed_head_ref(path: str, ref: str) -> str:
+    branch = ref.removeprefix("refs/heads/")
+    if (branch == ref or not branch or branch.startswith("-")
+            or any(c in ref for c in _ARG_FORBIDDEN)
+            or _git(path, "check-ref-format", ref)[0] != 0):
+        raise ValueError("invalid branch ref")
+    return ref
+
+
+def _managed_config(path: str, key: str) -> str | None:
+    rc, out, err = _managed_read(path, "config", "--null", "--get-all", key)
+    if rc == 1 and not out and not err:
+        return None
+    if rc != 0 or not out.endswith("\0") or out.count("\0") != 1:
+        raise ValueError("could not determine configured upstream")
+    return out[:-1]
+
+
+def _managed_upstream(path: str, branch: str | None) -> tuple[str | None, str | None]:
+    if branch is None:
+        return None, None
+    remote = _managed_config(path, f"branch.{branch}.remote")
+    ref = _managed_config(path, f"branch.{branch}.merge")
+    if remote is None and ref is None:
+        return None, f"refs/heads/{branch}"
+    if not remote or not is_safe_remote_name(remote) or not ref:
+        raise ValueError("invalid configured upstream")
+    return remote, _managed_head_ref(path, ref)
+
+
+def _managed_target(path: str, host_root: str) -> tuple[str, str]:
+    from paths import gitlab_host, managed_namespace
+
+    namespace = managed_namespace(host_root, path)
+    host = os.path.basename(os.path.normpath(host_root))
+    if gitlab_host(f"https://{host}") != host:
+        raise ValueError("invalid managed host directory")
+    if not os.path.exists(os.path.join(path, ".git")):
+        raise ValueError("not a Git working tree")
+    rc, top, _ = _managed_read(path, "rev-parse", "--show-toplevel")
+    if rc != 0 or os.path.normcase(os.path.realpath(top.removesuffix("\n"))) != (
+            os.path.normcase(os.path.realpath(path))):
+        raise ValueError("not the requested Git working tree")
+    return host, namespace
+
+
+def _managed_remote(path: str, identity: tuple[str, str],
+                    upstream: str | None,
+                    authority: tuple[str, str, int] | None = None) -> tuple[str, list[str], str]:
+    from paths import gitlab_authority, remote_identity
+
+    rc, out, _ = _managed_read(path, "remote")
+    if rc != 0:
+        raise ValueError("could not list configured remotes")
+    names = sorted(set(out.removesuffix("\n").split("\n"))) if out else []
+    if not all(is_safe_remote_name(name) for name in names):
+        raise ValueError("invalid configured remote name")
+    matches = {}
+    for name in names:
+        rc, out, _ = _managed_read(path, "remote", "get-url", "--all", "--", name)
+        url = out.removesuffix("\n")
+        # Git fetches just the first URL of a multi-URL remote. Reject multiple
+        # or multiline results rather than guessing which value is authoritative.
+        if (rc == 0 and not url.startswith("-")
+                and not any(c in url for c in _ARG_FORBIDDEN)
+                and remote_identity(url) == identity):
+            if authority is not None and url.startswith(("http://", "https://")):
+                parsed = urlsplit(url)
+                netloc = parsed.netloc.rsplit("@", 1)[-1]
+                if gitlab_authority(f"{parsed.scheme}://{netloc}") != authority:
+                    raise ValueError("Git remote does not match configured GitLab authority")
+            matches[name] = url
+    if upstream is not None:
+        if upstream not in matches:
+            raise ValueError("configured upstream does not match managed project")
+        return upstream, names, matches[upstream]
+    if len(matches) != 1:
+        raise ValueError("ambiguous managed GitLab remote" if matches
+                         else "no remote matches managed GitLab project")
+    name, url = next(iter(matches.items()))
+    return name, names, url
+
+
+def managed_source(path: str, host_root: str) -> tuple[str, list[str]]:
+    """Select one verified GitLab source, returning configured names only."""
+    identity = _managed_target(path, host_root)
+    upstream, _ = _managed_upstream(path, _managed_branch(path))
+    remote, names, _ = _managed_remote(path, identity, upstream)
+    return remote, names
+
+
+def _managed_env(settings: dict[str, str]) -> dict[str, str]:
+    count = os.environ.get("GIT_CONFIG_COUNT", "0")
+    if not re.fullmatch(r"[0-9]{1,9}", count) or os.environ.get("GIT_CONFIG_PARAMETERS"):
+        raise ValueError("cannot apply managed Git safety settings")
+    start = int(count)
+    env = {"GIT_CONFIG_COUNT": str(start + len(settings)),
+           "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
+           "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ALLOW_PROTOCOL": ""}
+    for index, (key, value) in enumerate(settings.items(), start):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
+def _managed_check_transports(path: str) -> None:
+    # Partial clones can fetch missing objects even during status/rev-list.
+    # A configured bundle URI introduces a second source during fetch.
+    rc, out, err = _managed_read(path, "config", "--name-only", "--get-regexp",
+                                 r"^(extensions\.partialclone|remote\..*\.promisor|fetch\.bundleuri)$")
+    if rc != 1 or out or err:
+        raise ValueError("managed sync cannot verify extra Git transport sources")
+
+
+def _managed_oid(path: str, ref: str, env: dict[str, str]) -> str | None:
+    rc, out, _ = _run([GIT_BIN, "-C", path, "rev-parse", "--verify",
+                       "--end-of-options", f"{ref}^{{commit}}"], env_extra=env)
+    return out if rc == 0 and re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", out) else None
+
+
+def _managed_dirty(path: str, env: dict[str, str]) -> bool:
+    rc, out, _ = _run([GIT_BIN, "-C", path, "status", "--porcelain=v1",
+                       "--untracked-files=all", "--ignore-submodules=none"], env_extra=env)
+    if rc != 0:
+        raise ValueError("could not determine working tree status")
+    return bool(out)
+
+
+def _managed_fetch(path: str, url: str, ref: str, fetched: str):
+    # Fetch the verified effective URL exactly once. Passing it as a URL would
+    # reapply insteadOf; passing its remote name would reread the source and
+    # honor that remote's custom fetch configuration. The fresh alias does
+    # neither and keeps any URL userinfo out of argv and FETCH_HEAD.
+    alias = f"gitlab-cli-{uuid4().hex}:"
+    fetch_env = _managed_env({
+        "core.hooksPath": os.devnull, "http.followRedirects": "false",
+        f"http.{url}.followRedirects": "false", f"url.{url}.insteadOf": alias,
+    })
+    fetch_env["GIT_ALLOW_PROTOCOL"] = "http:https:ssh"
+    resolved = _run([GIT_BIN, "-C", path, "ls-remote", "--get-url", "--", alias],
+                    env_extra=fetch_env, raw_stdout=True)
+    if resolved[0] != 0 or resolved[1].removesuffix("\n") != url:
+        raise ValueError("could not pin verified fetch URL")
+    return _run([GIT_BIN, "-C", path, "fetch", "--quiet", "--no-tags", "--no-prune",
+                 "--no-prune-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                 "--no-auto-maintenance", "--no-write-commit-graph", "--refmap=", "--",
+                 alias, f"{ref}:{fetched}"], env_extra=fetch_env)
+
+
+def _sync_managed(path: str, host_root: str, instance_url: str | None, res: dict) -> dict:
+    from paths import gitlab_authority
+
+    try:
+        if instance_url is None:
+            raise ValueError("Managed sync requires configured GitLab instance URL")
+        authority = gitlab_authority(instance_url)
+        identity = _managed_target(path, host_root)
+        if authority[1] != identity[0]:
+            raise ValueError("Configured GitLab authority does not match managed host")
+        branch = _managed_branch(path)
+        if branch is None:
+            return dict(res, status=S_DETACHED, detail="detached HEAD — skipped")
+        res.update(branch=branch, shallow=is_shallow(path))
+        upstream, ref = _managed_upstream(path, branch)
+        remote, _, url = _managed_remote(path, identity, upstream, authority)
+        res["remote"] = remote
+        _managed_check_transports(path)
+        local_env = _managed_env({
+            "core.hooksPath": os.devnull, "core.fsmonitor": "false",
+            "submodule.recurse": "false", "core.sparseCheckout": "false",
+            "filter.lfs.process": "", "filter.lfs.smudge": "",
+            "filter.lfs.clean": "", "filter.lfs.required": "false",
+        })
+        head = _managed_oid(path, "HEAD", local_env)
+        if head is None or ref is None:
+            raise ValueError("could not determine checked-out commit")
+        res["dirty"] = _managed_dirty(path, local_env)
+        if res["dirty"]:
+            return dict(res, status=S_DIRTY, detail="working tree is dirty — not pulled")
+
+        # Private per-run ref avoids stale or concurrently overwritten FETCH_HEAD.
+        fetched = f"refs/gitlab-cli/sync/{uuid4().hex}"
+        tip = None
+        try:
+            rc, _, err = _managed_fetch(path, url, ref, fetched)
+            if rc != 0:
+                status = (S_NO_REMOTE if "couldn't find remote ref" in err else classify(err))
+                return dict(res, status=S_ERROR if status == S_LFS else status,
+                            detail="verified branch fetch failed")
+            tip = _managed_oid(path, fetched, local_env)
+            if tip is None:
+                raise ValueError("fetch did not produce a verified commit")
+            rc, out, _ = _run([GIT_BIN, "-C", path, "rev-list", "--left-right",
+                               "--count", f"{head}...{tip}"], env_extra=local_env)
+            if rc != 0 or not re.fullmatch(r"[0-9]+\s+[0-9]+", out):
+                raise ValueError("could not compare local and fetched commits")
+            ahead, behind = map(int, out.split())
+            res.update(ahead=ahead, behind=behind)
+            if ahead:
+                if behind:
+                    return dict(res, status=S_DIVERGED, detail="local and remote branches diverged")
+                return dict(res, status=S_AHEAD, detail=f"{ahead} unpushed commit(s)")
+            if not behind:
+                return dict(res, status=S_UP_TO_DATE)
+            if (_managed_target(path, host_root) != identity or _managed_branch(path) != branch
+                    or _managed_oid(path, "HEAD", local_env) != head
+                    or _managed_upstream(path, branch) != (upstream, ref)):
+                raise ValueError("checked-out branch or its upstream changed during fetch")
+            _managed_check_transports(path)
+            selected, _, effective = _managed_remote(path, identity, upstream, authority)
+            if (selected, effective) != (remote, url):
+                raise ValueError("verified GitLab source changed during fetch")
+            if _managed_dirty(path, local_env):
+                return dict(res, status=S_DIRTY, dirty=True, detail="working tree changed during fetch")
+            rc, _, _ = _run([GIT_BIN, "-C", path, "merge", "--ff-only", "--no-autostash",
+                             "--no-overwrite-ignore", tip], env_extra={**local_env, **_LFS_SKIP_SMUDGE})
+            if rc != 0:
+                raise ValueError("git merge --ff-only refused the update")
+            # Do not do a second network operation via a separately configured LFS URL.
+            detail = f"{behind} commit(s) from {remote}"
+            if _attrs_mention_lfs(path):
+                res["lfs"] = "LFS content not fetched by managed sync"
+                detail += f" — {res['lfs']}"
+            return dict(res, status=S_PULLED, detail=detail)
+        finally:
+            if tip is not None:
+                _run([GIT_BIN, "-C", path, "update-ref", "-d", fetched, tip],
+                     env_extra=local_env)
+    except ValueError as exc:
+        return dict(res, status=S_ERROR, detail=str(exc))
+
+
+def sync_repo(path: str, *, host_root: str | None = None,
+              instance_url: str | None = None) -> dict:
+    """Fast-forward from a verified managed source, or use legacy standalone sync."""
     res = {
         "path": path, "status": S_ERROR, "detail": "",
         "branch": None, "remote": None, "ahead": 0, "behind": 0,
         "other": [], "shallow": False,
     }
+
+    if host_root is not None:
+        return _sync_managed(path, host_root, instance_url, res)
 
     if not os.path.exists(os.path.join(path, ".git")):
         res["status"], res["detail"] = S_ERROR, "Not a git repo"

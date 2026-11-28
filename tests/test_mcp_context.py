@@ -522,9 +522,58 @@ class TestPaginate(unittest.TestCase):
         self.assertEqual(1, len(items))
         self.assertTrue(truncated)
 
+    def test_non_numeric_next_page_raises_instead_of_returning_complete(self):
+        ctx = make_context("example", responses=[
+            page([{"id": 1}], next_page="cursor", total=2),
+        ])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError,
+                                    "unsupported non-numeric X-Next-Page"):
+            ctx.paginate("/projects")
+        self.assertEqual(1, len(ctx.session.calls))
+
+    def test_non_numeric_next_page_raises_at_exact_ceiling(self):
+        ctx = make_context("example", responses=[
+            page([{"id": 1}], next_page="cursor"),
+        ])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError,
+                                    "unsupported non-numeric X-Next-Page"):
+            ctx.paginate("/projects", max_items=1)
+
+    def test_repeated_page_number_raises_instead_of_looping(self):
+        ctx = make_context("example", responses=[
+            page([{"id": 1}], next_page=1),
+        ])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError,
+                                    "non-advancing X-Next-Page"):
+            ctx.paginate("/projects")
+        self.assertEqual(1, len(ctx.session.calls))
+
+    def test_total_shortfall_raises_instead_of_returning_complete(self):
+        ctx = make_context("example", responses=[
+            page([{"id": 1}], next_page="", total=2),
+        ])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError,
+                                    "server reports 2 record"):
+            ctx.paginate("/projects")
+
     def test_an_empty_first_page_returns_an_empty_complete_result(self):
         ctx = make_context("example", responses=[page([], total=0)])
         self.assertEqual(([], False, 0), ctx.paginate("/projects"))
+
+    def test_a_missing_first_page_body_raises(self):
+        ctx = make_context("example", responses=[FakeResponse(200)])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError, "expected a JSON list"):
+            ctx.paginate("/projects")
+
+    def test_a_missing_intermediate_page_body_raises(self):
+        ctx = make_context("example", responses=[
+            page([{"id": 1}], next_page=2, total=3),
+            FakeResponse(204, headers={"X-Next-Page": "3"}),
+            page([{"id": 3}]),
+        ])
+        with self.assertRaisesRegex(ctxmod.GitLabHTTPError, "expected a JSON list"):
+            ctx.paginate("/projects")
+        self.assertEqual([1, 2], [c["params"]["page"] for c in ctx.session.calls])
 
     def test_a_failing_page_raises(self):
         ctx = make_context("example", responses=[
