@@ -60,7 +60,7 @@ class HostLayoutMCPTests(unittest.TestCase):
 
     def project(self, namespace):
         return {"path_with_namespace": namespace, "empty_repo": True,
-                "id": int.from_bytes(namespace.encode()),
+                "id": int.from_bytes(namespace.encode(), "big"),
                 "http_url_to_repo": f"{self.context.url}/{namespace}.git"}
 
     def test_sync_exact_namespace_and_host_in_both_phases(self):
