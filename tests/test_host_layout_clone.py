@@ -25,15 +25,17 @@ class ManagedCloneTests(unittest.TestCase):
         self.project = self.project_at("team/sub/repo")
         self.target = self.root / "team/sub/repo"
         self.output = io.StringIO()
-        self.enterContext(contextlib.redirect_stdout(self.output))
-        self.groups = self.enterContext(patch.object(clone, "get_group", return_value={"id": 1, "full_path": "team/sub"}))
-        self.projects = self.enterContext(patch.object(clone, "get_projects", return_value=[self.project]))
-        self.subgroups = self.enterContext(patch.object(clone, "get_subgroups", return_value=[]))
-        self.lookup = self.enterContext(patch.object(clone.gitlab_api, "get_project", return_value=None))
-        self.transfer = self.enterContext(patch.object(clone.gitlib, "clone_repo_managed", autospec=True))
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(contextlib.redirect_stdout(self.output))
+        self.groups = self.stack.enter_context(patch.object(clone, "get_group", return_value={"id": 1, "full_path": "team/sub"}))
+        self.projects = self.stack.enter_context(patch.object(clone, "get_projects", return_value=[self.project]))
+        self.subgroups = self.stack.enter_context(patch.object(clone, "get_subgroups", return_value=[]))
+        self.lookup = self.stack.enter_context(patch.object(clone.gitlab_api, "get_project", return_value=None))
+        self.transfer = self.stack.enter_context(patch.object(clone.gitlib, "clone_repo_managed", autospec=True))
         self.transfer.return_value = {"status": "ok"}
-        self.legacy = self.enterContext(patch.object(clone, "_clone", return_value={"status": "ok"}))
-        self.move = self.enterContext(patch.object(clone, "try_rename_repair", return_value={"action": "none"}))
+        self.legacy = self.stack.enter_context(patch.object(clone, "_clone", return_value={"status": "ok"}))
+        self.move = self.stack.enter_context(patch.object(clone, "try_rename_repair", return_value={"action": "none"}))
 
     def project_at(self, namespace, number=42):
         return dict(id=number, path=namespace.rsplit("/", 1)[-1],
@@ -75,7 +77,7 @@ class ManagedCloneTests(unittest.TestCase):
             str(dest / "team/sub/repo"), instance_url=self.cfg["url"], host_root=str(dest))
 
     def test_managed_outcomes_never_report_incomplete_or_failed_as_success(self):
-        self.enterContext(patch.object(clone, "_session_stats", {"cloned": 0}))
+        self.stack.enter_context(patch.object(clone, "_session_stats", {"cloned": 0}))
         for status, field, value in (
             (clone.gitlib.S_SHALLOW, "reason", clone.gitlib.S_SHALLOW),
             (clone.gitlib.S_LFS, "reason", clone.gitlib.S_LFS),

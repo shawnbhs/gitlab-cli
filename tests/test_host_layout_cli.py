@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
 
 import _error_log_guard  # noqa: F401
@@ -42,7 +42,9 @@ def checkout(repo, *remotes):
 
 class HostLayoutCLI(unittest.TestCase):
     def setUp(self):
-        self.tmp_path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.tmp_path = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.config = instances.build_cfg({
             "name": "One", "url": "https://one.example.test",
             "master_dir": str(self.tmp_path / "clones"), "folder": "legacy",
@@ -104,7 +106,7 @@ class HostLayoutCLI(unittest.TestCase):
                         ("source", "https://one.example.test/group/sub/repo.git"))
         checkout(root / "sub/wrong", ("source", "https://one.example.test/sub/wrong.git"))
         sync = Mock(return_value={"path": str(repo), "status": pull.S_UP_TO_DATE, "other": []})
-        self.enterContext(patch.object(pull, "sync_repo", sync))
+        self.stack.enter_context(patch.object(pull, "sync_repo", sync))
         pull.cmd_pull(self.config, "group/sub")
         sync.assert_called_once_with(str(repo), host_root=str(root), instance_url=self.config["url"])
         pull.cmd_pull(self.config, "unrelated/sub")
@@ -119,9 +121,9 @@ class HostLayoutCLI(unittest.TestCase):
         pull_group = Mock()
         reconcile = Mock(side_effect=AssertionError("must not reconcile"))
         prune = Mock(side_effect=AssertionError("must not prune"))
-        self.enterContext(patch.object(cli, "cmd_pull", pull_group))
-        self.enterContext(patch.object(cli, "_reconcile_renames", reconcile))
-        self.enterContext(patch.object(cli, "_prune_leftovers", prune))
+        self.stack.enter_context(patch.object(cli, "cmd_pull", pull_group))
+        self.stack.enter_context(patch.object(cli, "_reconcile_renames", reconcile))
+        self.stack.enter_context(patch.object(cli, "_prune_leftovers", prune))
         cli._sync_group(self.config, "group/sub", self.config["master_dir"], {})
         pull_group.assert_called_once_with(self.config, "group/sub", self.config["master_dir"])
         reconcile.assert_not_called()
@@ -163,7 +165,7 @@ class HostLayoutCLI(unittest.TestCase):
         assert cli._instance_coverage_counts(self.config, index, projects)["all_present"] == 2
         # Doctor uses the same canonical index and does not infer that "folder" is missing.
         marked = Mock()
-        self.enterContext(patch.object(setup, "_mark", marked))
+        self.stack.enter_context(patch.object(setup, "_mark", marked))
         setup._config_completeness_check("One", self.config, {"ok": True, "by_key": {
             ("one.example.test", "Group/sub/repo"): [str(good)]}}, "one.example.test", [])
         assert marked.call_args.args[1] == "ok"
@@ -172,10 +174,10 @@ class HostLayoutCLI(unittest.TestCase):
     def test_clone_destination_is_host_qualified_or_refused(self):
         others = {"instances": [{"name": "Other", "url": "https://other.example.test",
                                  "master_dir": self.config["base_dir"]}]}
-        self.enterContext(patch.object(instances, "_read_instances", lambda: (others, "")))
-        self.enterContext(patch.object(cli.setup_mod, "ensure_setup", lambda: self.config))
+        self.stack.enter_context(patch.object(instances, "_read_instances", lambda: (others, "")))
+        self.stack.enter_context(patch.object(cli.setup_mod, "ensure_setup", lambda: self.config))
         clone = Mock()
-        self.enterContext(patch.object(cli, "cmd_clone", clone))
+        self.stack.enter_context(patch.object(cli, "cmd_clone", clone))
         cli._run(["clone", "group/sub"])
         clone.assert_called_once_with(self.config, "group/sub", self.config["master_dir"])
         clone.reset_mock()
@@ -194,10 +196,10 @@ class HostLayoutCLI(unittest.TestCase):
         managed = str(Path(root) / "group/managed")
         offsite = str(self.tmp_path / "offsite/group/repo")
         repos = [offsite, managed]
-        self.enterContext(patch.object(cli, "_remotes_scope_and_repos",
+        self.stack.enter_context(patch.object(cli, "_remotes_scope_and_repos",
                                        return_value=(scope, repos, {})))
-        self.enterContext(patch.object(cli.setup_mod, "ensure_setup", return_value=self.config))
-        self.enterContext(patch.object(cli, "_activate_instance"))
+        self.stack.enter_context(patch.object(cli.setup_mod, "ensure_setup", return_value=self.config))
+        self.stack.enter_context(patch.object(cli, "_activate_instance"))
 
         for interactive in (True, False):
             for managed_leak in (False, True):

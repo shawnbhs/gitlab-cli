@@ -1,3 +1,4 @@
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,12 +127,14 @@ class HostLayoutConfigTests(unittest.TestCase):
         import instances
 
         self.instances = instances
-        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.config_file = tmp / "config/instances.json"
-        self.enterContext(patch.object(instances, "CONFIG_DIR", str(self.config_file.parent)))
-        self.enterContext(patch.object(instances, "INSTANCES_FILE", str(self.config_file)))
-        self.enterContext(patch.object(paths, "INSTALL_ROOT", str(tmp)))
-        self.token = self.enterContext(patch.object(instances.creds, "resolve_token", return_value=""))
+        self.stack.enter_context(patch.object(instances, "CONFIG_DIR", str(self.config_file.parent)))
+        self.stack.enter_context(patch.object(instances, "INSTANCES_FILE", str(self.config_file)))
+        self.stack.enter_context(patch.object(paths, "INSTALL_ROOT", str(tmp)))
+        self.token = self.stack.enter_context(patch.object(instances.creds, "resolve_token", return_value=""))
         self.record = {"name": "Friendly", "url": "https://lab.example/", "master_dir": "tree/team",
                        "folder": "team", "user_namespaces": ["example"], "min_access_level": 20}
 
